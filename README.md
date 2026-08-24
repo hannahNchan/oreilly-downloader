@@ -12,6 +12,8 @@ For personal and educational use only. Please read the [O'Reilly Terms of Servic
 
 ## Credits
 
+Fork of [oreilly-ingest](https://github.com/Mosaibah/oreilly-ingest) by [@Mosaibah](https://github.com/Mosaibah).
+
 Inspired by [safaribooks](https://github.com/lorenzodifuccia/safaribooks) by [@lorenzodifuccia](https://github.com/lorenzodifuccia).
 
 
@@ -23,6 +25,7 @@ Inspired by [safaribooks](https://github.com/lorenzodifuccia/safaribooks) by [@l
 - **O'Reilly V2 API** - fast and reliable
 - **Images & styles included** - complete book experience
 - **Web UI** - search, preview, download
+- **Translation with a local LLM** *(beta)* - translate while downloading, via Ollama
 
 <img src="docs/main.png" alt="Main Page">
 
@@ -31,7 +34,7 @@ Inspired by [safaribooks](https://github.com/lorenzodifuccia/safaribooks) by [@l
 ### Docker
 
 ```bash
-git clone https://github.com/mosaibah/oreilly-downloader.git
+git clone https://github.com/hannahNchan/oreilly-downloader.git
 cd oreilly-downloader
 docker compose up -d
 ```
@@ -39,7 +42,7 @@ docker compose up -d
 ### Python
 
 ```bash
-git clone https://github.com/mosaibah/oreilly-downloader.git
+git clone https://github.com/hannahNchan/oreilly-downloader.git
 cd oreilly-downloader
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
@@ -53,6 +56,73 @@ Then open http://localhost:8000
 Click "Set Cookies" in the web interface and follow the steps:
 
 <img src="docs/cookie-modal.png" alt="Cookie Setup" style="max-width:320px; height:auto;">
+
+## Translation (local LLM)
+
+> **BETA.** It works, but expect rough edges: a full book takes hours, the
+> output is not proofread, and quality depends heavily on the model you pick.
+> Treat the result as a draft, not a finished translation.
+
+Chapters are translated by a model running on your own machine, as part of the
+download. Nothing is sent to a third-party service and no API key is involved.
+
+### Setup
+
+Install [Ollama](https://ollama.com), pull a model, and leave it running:
+
+```bash
+ollama pull qwen3.5:9b
+```
+
+Then pick a language under **Translate (local LLM)** in the download modal.
+`Original (no translation)` is the default, so nothing changes until you ask for
+it. If Ollama isn't reachable the download fails immediately instead of quietly
+giving you an untranslated book.
+
+### Choosing a model
+
+A model that fits entirely in VRAM beats a bigger one that spills to CPU. On the
+same chapter, `qwen3.5:9b` (~6.6 GB) measured roughly **3x faster** than
+`qwen3-coder:30b` (18.6 GB, offloaded) — and coder-tuned models are worse at
+prose than general ones. Very small models are a false economy: sub-7B ones
+mangled short fragments, returning a whole paragraph where the source had two
+words.
+
+### Configuration
+
+All of it lives in `config.py`:
+
+| Setting | Default | What it does |
+|---------|---------|--------------|
+| `OLLAMA_URL` | `http://localhost:11434` | Where Ollama listens |
+| `OLLAMA_MODEL` | `qwen3.5:9b` | Model used to translate |
+| `OLLAMA_NUM_CTX` | `16384` | Context window. **Don't lower this** — Ollama's 4096 default silently truncates the reply, and whole passages come back untranslated |
+| `OLLAMA_DISABLE_THINKING` | `True` | Skips the "reasoning" pass, which is wasted time here. Models that reject the flag are retried without it |
+| `TRANSLATE_BATCH_CHARS` | `4000` | Characters per request. Fewer round-trips is much faster |
+| `TRANSLATE_TIMEOUT` | `300` | Seconds allowed per request |
+| `TRANSLATE_LANGUAGES` | `es-LATAM` | Target languages, as `code -> instruction for the model`. Add your own here |
+
+### What it will and won't touch
+
+- **Code is never translated.** `pre`, `code`, `kbd`, `samp`, `var`, `tt`,
+  `script` and `style` are left exactly as they came.
+- Text is translated **per block** — paragraph, list item, heading, table cell —
+  not per text node. A sentence broken up by `<em>` or `<code>` reaches the model
+  as one sentence, which is the difference between a translation and word salad.
+- Every result is validated before being accepted: if the returned markup lost a
+  tag or dropped the contents of a `<code>`, the original block is kept.
+- Batches that come back with entries missing are retried in halves, so one bad
+  response doesn't cost you a chapter.
+
+### Known limits
+
+- **Slow.** Hours for a full book on consumer hardware. The download itself takes
+  minutes; the translation is everything after that.
+- **Your O'Reilly session may be shorter than the job.** Chapters are all fetched
+  first and translated afterwards, so the session only has to survive the
+  download phase. If it does expire mid-download you get an explicit error, not a
+  silently truncated book — paste fresh cookies and run it again.
+- Only `es-LATAM` (neutral Latin American Spanish) ships configured.
 
 ## Architecture
 
@@ -89,24 +159,3 @@ Found a bug or have an idea? PRs and issues are always welcome!
 ## License
 
 MIT
-
-## Star History
-
-<picture>
-  <source
-    media="(prefers-color-scheme: dark)"
-    srcset="
-      https://api.star-history.com/svg?repos=Mosaibah/oreilly-ingest&type=Date&theme=dark
-    "
-  />
-  <source
-    media="(prefers-color-scheme: light)"
-    srcset="
-      https://api.star-history.com/svg?repos=Mosaibah/oreilly-ingest&type=Date
-    "
-  />
-  <img
-    alt="Star History Chart"
-    src="https://api.star-history.com/svg?repos=Mosaibah/oreilly-ingest&type=Date"
-  />
-</picture>
