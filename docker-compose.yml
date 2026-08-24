@@ -1,0 +1,9 @@
+services:
+  oreilly-ingest:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data
+      - ./output:/app/output
+      - ./web/static:/app/web/static:ro

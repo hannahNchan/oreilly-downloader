@@ -1,0 +1,887 @@
+/**
+ * O'Reilly Ingest - Minimal CSS
+ * Most styles are now in Tailwind. This file contains only:
+ * - Base reset
+ * - Scrollbar styling
+ * - Has-expanded state for dimming cards
+ */
+
+/* Base reset */
+*, *::before, *::after {
+    box-sizing: border-box;
+}
+
+/* Scrollbar styling for description and chapters list */
+.book-description::-webkit-scrollbar,
+.chapters-list::-webkit-scrollbar {
+    width: 4px;
+}
+
+.book-description::-webkit-scrollbar-track,
+.chapters-list::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+.book-description::-webkit-scrollbar-thumb,
+.chapters-list::-webkit-scrollbar-thumb {
+    background: #d4d4d8;
+    border-radius: 2px;
+}
+
+.book-description::-webkit-scrollbar-thumb:hover,
+.chapters-list::-webkit-scrollbar-thumb:hover {
+    background: #a1a1aa;
+}
+
+/* Con la tarjeta expandida flotando, el backdrop ya oscurece el fondo.
+   Sólo se bloquea la interacción con las tarjetas de atrás. */
+#search-results.has-expanded .book-card:not(.expanded) {
+    pointer-events: none;
+}
+
+/* Checkbox accent color */
+input[type="checkbox"] {
+    accent-color: #0073e6;
+}
+
+/* ===== "En la biblioteca" (libro ya descargado) =====
+   Se usa .book-card.in-library (2 clases) para ganar en especificidad a las
+   utilidades de Tailwind que expandBook/collapseBook agregan y quitan. */
+.book-card.in-library {
+    border-left: 4px solid #10b981;
+    background: linear-gradient(90deg, #f0fdf4 0%, #ffffff 22%);
+}
+
+.library-ribbon {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    flex-shrink: 0;
+    padding: 4px 10px;
+    border-radius: 5px;
+    background: #10b981;
+    color: #fff;
+    font-size: 0.625rem;
+    font-weight: 800;
+    text-transform: uppercase;
+    letter-spacing: 0.07em;
+    white-space: nowrap;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, .12);
+}
+
+.library-ribbon svg { width: 12px; height: 12px; flex-shrink: 0; }
+
+/* Check sobre la portada, para reconocerlo de un vistazo */
+.cover-wrap { position: relative; flex-shrink: 0; }
+
+.cover-check {
+    position: absolute;
+    top: -5px;
+    right: -5px;
+    width: 19px;
+    height: 19px;
+    border-radius: 50%;
+    background: #10b981;
+    border: 2px solid #fff;
+    display: grid;
+    place-items: center;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, .2);
+}
+
+.cover-check svg { width: 10px; height: 10px; color: #fff; }
+
+@media (max-width: 520px) {
+    /* En pantallas chicas el texto no cabe: queda el check de la portada */
+    .library-ribbon { display: none; }
+}
+
+/* ===== Tile cuadrado (vista en grid) =====
+   Todas las tarjetas miden lo mismo (aspect-ratio 1) para que la cuadrícula
+   quede pareja. Las portadas de libro son verticales, así que se muestran
+   completas con object-fit:contain y el hueco lo rellena una copia borrosa
+   de la misma imagen — así no se recorta el título de la portada. */
+.book-card .book-summary {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+}
+
+#search-results .book-card,
+#library-grid .book-card {
+    aspect-ratio: 1 / 1;
+    display: flex;
+    flex-direction: column;
+}
+
+.tile-cover {
+    position: relative;
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow: hidden;
+    background: #f4f4f5;
+    display: grid;
+    place-items: center;
+}
+
+.tile-blur {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    filter: blur(16px) saturate(1.3);
+    transform: scale(1.25);
+    opacity: .45;
+}
+
+/* Caja definida (100% del contenedor + padding) en vez de sólo max-*: así el
+   layout es estable antes de que la imagen cargue y una portada rota no
+   colapsa el tile. object-fit:contain la muestra completa sin recortar, y
+   drop-shadow sigue el contorno real de la imagen (box-shadow dibujaría un
+   rectángulo alrededor de la caja con letterbox incluido). */
+.tile-img {
+    /* absolute + inset:0 da una caja DEFINIDA igual al contenedor. Con
+       height:100% sobre un grid item de altura indefinida el porcentaje se
+       resolvía contra el contenido y la portada desbordaba (188x219 dentro de
+       131px de alto), quedando recortada por el overflow:hidden. */
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    padding: 12px 20px 22px;
+    object-fit: contain;
+    filter: drop-shadow(0 6px 14px rgba(0, 0, 0, .35));
+    transition: transform .18s ease;
+}
+
+.book-card:hover .tile-img { transform: translateY(-3px) scale(1.03); }
+
+.tile-meta {
+    flex: 0 0 auto;
+    padding: 9px 11px 11px;
+    background: #fff;
+    border-top: 1px solid #f1f1f4;
+}
+
+.tile-title {
+    font-size: 0.8125rem;
+    font-weight: 600;
+    color: #18181b;
+    line-height: 1.3;
+    /* dos líneas como máximo, con puntos suspensivos */
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+}
+
+.tile-author {
+    margin-top: 2px;
+    font-size: 0.6875rem;
+    color: #a1a1aa;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+/* Cintillo sobre la portada, abajo */
+.tile-ribbon {
+    position: absolute;
+    left: 6px;
+    right: 6px;
+    bottom: 6px;
+    display: flex;
+    justify-content: center;
+    pointer-events: none;
+}
+
+.tile-ribbon .library-ribbon { font-size: 0.5625rem; padding: 3px 7px; }
+
+/* En el tile, el check va sobre la esquina de la portada */
+.tile-cover .cover-check { top: 6px; right: 6px; }
+
+/* El borde verde de "en la biblioteca" no aplica al tile: se ve el cintillo */
+#search-results .book-card.in-library,
+#library-grid .book-card.in-library {
+    border-left-width: 1px;
+    border-left-color: #a7f3d0;
+    background: #fff;
+}
+
+
+/* ===== Tarjeta expandida flotante =====
+   Antes el panel vivía en el flujo y empujaba la lista hacia abajo. Ahora es
+   `fixed` y flota centrado, así la lista de resultados no se mueve.
+   Nota: funciona porque ningún ancestro tiene transform/filter (eso lo
+   convertiría en el bloque contenedor y lo recortaría el overflow-hidden). */
+.book-card.expanded .book-expanded {
+    position: fixed;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    width: min(760px, calc(100vw - 2rem));
+    max-height: 86vh;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    z-index: 60;
+    background: #fff;
+    border: 1px solid #e4e4e7;
+    border-radius: 14px;
+    box-shadow: 0 24px 64px rgba(0, 0, 0, .3);
+    animation: card-pop .16s ease-out;
+}
+
+/* Se anima SOLO la posición, nunca la opacidad: si la animación se estanca
+   (pestaña en segundo plano, throttling del compositor), el panel sigue
+   visible. Arrancar en opacity:0 lo dejaría invisible pero clickeable. */
+@keyframes card-pop {
+    from { transform: translate(-50%, -48%) scale(.98); }
+    to   { transform: translate(-50%, -50%) scale(1); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .book-card.expanded .book-expanded,
+    #card-backdrop { animation: none; }
+}
+
+/* OJO: no darle position+z-index a .book-card.expanded. Eso crea un contexto
+   de apilamiento y el z-index:60 del panel pasa a resolverse DENTRO de la
+   tarjeta, quedando por debajo del backdrop (z-index:50) — el backdrop se
+   pintaba encima del modal y se veía todo gris. El panel es `fixed`, así que
+   no necesita que la tarjeta esté posicionada. */
+
+#card-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 50;
+    background: rgba(9, 9, 11, .5);
+    animation: backdrop-in .16s ease-out;
+}
+
+@keyframes backdrop-in { from { opacity: 0; } to { opacity: 1; } }
+
+@media (max-width: 640px) {
+    .book-card.expanded .book-expanded {
+        width: calc(100vw - 1rem);
+        max-height: 90vh;
+    }
+}
+
+
+/* ===== Conmutador de tipo de contenido ===== */
+.ct-tab {
+    background: #fff;
+    color: #71717a;
+    cursor: pointer;
+    transition: background .15s, color .15s, border-color .15s;
+}
+
+.ct-tab:hover { background: #fafafa; color: #3f3f46; }
+
+.ct-tab.ct-active {
+    background: #0073e6;
+    border-color: #0073e6;
+    color: #fff;
+}
+
+/* Badge de duración sobre la portada del audiolibro */
+.tile-duration {
+    position: absolute;
+    top: 6px;
+    left: 6px;
+    padding: 2px 6px;
+    border-radius: 4px;
+    background: rgba(9, 9, 11, .72);
+    color: #fff;
+    font-size: 0.5625rem;
+    font-weight: 700;
+    letter-spacing: .02em;
+}
+
+
+/* =====================================================================
+   MODO OSCURO
+   La app usa utilidades de Tailwind directamente en ~250 sitios. Anadir
+   `dark:` a cada una seria un diff enorme y facil de romper, asi que se
+   remapean aqui las 12 clases neutras que cubren casi todo el uso.
+   `.dark .bg-white` (2 clases) gana en especificidad a `.bg-white` (1).
+   ===================================================================== */
+
+.dark body,
+.dark .bg-white          { background-color: #17171b !important; }
+.dark .bg-zinc-50        { background-color: #1e1e23 !important; }
+.dark .bg-zinc-100       { background-color: #26262c !important; }
+.dark .bg-surface-50     { background-color: #1e1e23 !important; }
+
+.dark .border-zinc-100   { border-color: #26262c !important; }
+.dark .border-zinc-200   { border-color: #2f2f37 !important; }
+.dark .border-zinc-300   { border-color: #3f3f4a !important; }
+
+.dark .text-zinc-900     { color: #f4f4f5 !important; }
+.dark .text-zinc-700     { color: #e0e0e5 !important; }
+.dark .text-zinc-600     { color: #c8c8d0 !important; }
+.dark .text-zinc-500     { color: #a1a1ab !important; }
+.dark .text-zinc-400     { color: #8a8a95 !important; }
+.dark .text-zinc-300     { color: #6b6b76 !important; }
+
+/* El azul claro de "seleccionado" es ilegible sobre fondo oscuro */
+.dark .bg-oreilly-blue-light { background-color: #10304a !important; }
+
+.dark body { color: #f4f4f5; }
+
+/* El header es translucido: su blanco/95 tapaba el contenido al hacer scroll */
+.dark header.bg-white\/95 { background-color: rgba(23, 23, 27, .95) !important; }
+
+/* --- Componentes propios (usan hex, no utilidades) --- */
+.dark .tile-cover        { background: #26262c; }
+.dark .tile-meta         { background: #1e1e23; border-top-color: #2f2f37; }
+.dark .tile-title        { color: #f4f4f5; }
+.dark .tile-author       { color: #8a8a95; }
+
+.dark .book-card.expanded .book-expanded {
+    background: #1a1a1f;
+    border-color: #2f2f37;
+    box-shadow: 0 24px 64px rgba(0, 0, 0, .6);
+}
+
+.dark #card-backdrop     { background: rgba(0, 0, 0, .68); }
+
+.dark .cover-check       { border-color: #17171b; }
+
+.dark #search-results .book-card.in-library,
+.dark #library-grid .book-card.in-library {
+    border-left-color: #14603f;
+    background: #17171b;
+}
+
+.dark .book-card.in-library {
+    border-left-color: #10b981;
+    background: linear-gradient(90deg, #10241c 0%, #17171b 22%);
+}
+
+.dark .ct-tab            { background: #1e1e23; color: #a1a1ab; }
+.dark .ct-tab:hover      { background: #26262c; color: #e4e4e7; }
+.dark .ct-tab.ct-active  { background: #0073e6; border-color: #0073e6; color: #fff; }
+
+.dark .book-description::-webkit-scrollbar-thumb,
+.dark .chapters-list::-webkit-scrollbar-thumb { background: #3f3f4a; }
+
+/* Los <select> y <input> nativos no heredan el remapeo de fondo */
+.dark select,
+.dark input[type="text"],
+.dark input[type="number"] {
+    background-color: #1e1e23;
+    color: #e4e4e7;
+    border-color: #2f2f37;
+}
+
+.dark select option { background-color: #1e1e23; color: #e4e4e7; }
+
+/* Icono del interruptor: sol en claro, luna en oscuro */
+.theme-icon-moon { display: none; }
+.dark .theme-icon-sun { display: none; }
+.dark .theme-icon-moon { display: block; }
+
+
+/* ===== Cintillos de formato (esquina superior derecha) =====
+   Un libro puede tener varios formatos en disco (epub + pdf + markdown), asi
+   que se apilan en vez de mostrar solo uno. */
+.tile-formats {
+    position: absolute;
+    top: 6px;
+    right: 6px;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 3px;
+    pointer-events: none;
+    z-index: 2;
+}
+
+.fmt-badge {
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-size: 0.5rem;
+    font-weight: 800;
+    letter-spacing: .06em;
+    color: #fff;
+    background: rgba(9, 9, 11, .78);
+    box-shadow: 0 1px 3px rgba(0, 0, 0, .28);
+}
+
+/* Cada formato con su color, para reconocerlo de un vistazo */
+.fmt-badge.fmt-epub  { background: #0073e6; }
+.fmt-badge.fmt-pdf   { background: #d4002d; }
+.fmt-badge.fmt-audio { background: #7c3aed; }
+.fmt-badge.fmt-markdown { background: #0f766e; }
+.fmt-badge.fmt-json,
+.fmt-badge.fmt-jsonl { background: #b45309; }
+/* LOCAL no es un formato: es un estado (en cache, sin pasar a la biblioteca) */
+.fmt-badge.loc-local { background: #d97706; }
+
+.fmt-badge.fmt-text,
+.fmt-badge.fmt-toon  { background: #52525b; }
+
+/* Barra de transferencia. El ambar de Tailwind no se remapea en oscuro (solo
+   los neutros lo estan), asi que aqui se apaga a mano. */
+.btn-transfer {
+    padding: 6px 12px;
+    border-radius: 8px;
+    font-size: .75rem;
+    font-weight: 500;
+    color: #fff;
+    background: #d97706;
+    transition: background-color .15s ease;
+}
+.btn-transfer:hover { background: #b45309; }
+.btn-transfer:disabled { background: #d4d4d8; cursor: not-allowed; }
+.btn-transfer:focus-visible {
+    outline: 2px solid #d97706;
+    outline-offset: 2px;
+}
+.dark #transfer-bar {
+    background: rgba(120, 53, 15, .22) !important;
+    border-color: rgba(180, 83, 9, .45) !important;
+}
+.dark #transfer-msg { color: #fcd34d !important; }
+
+/* En el visor local el cintillo verde iria en la esquina que ahora ocupan los
+   formatos, asi que ahi se muestra abajo a la izquierda. */
+#library-grid .tile-duration { top: auto; bottom: 6px; left: 6px; }
+
+/* El menu de la tarjeta se ancla aqui, no en la portada. Solo `position`, sin
+   z-index: un z-index crearia un contexto de apilamiento y ya rompio una vez
+   la modal flotante. Y va acotado al visor para no tocar las tarjetas de
+   busqueda, que si conviven con esa modal. */
+#library-grid .book-card { position: relative; }
+
+
+/* =====================================================================
+   RONDA DE UI: posiciones estables, separacion legible, foco visible
+   Espaciados en multiplos de 4px.
+   ===================================================================== */
+
+/* Reserva el hueco de la barra de scroll SIEMPRE: sin esto el layout se
+   desplaza ~15px en horizontal al pasar de "sin resultados" a "con
+   resultados", porque aparece la barra y el viewport se estrecha. */
+html { scrollbar-gutter: stable; }
+
+/* --- Foco visible en todo lo interactivo (antes solo habia hover) --- */
+button:focus-visible,
+a:focus-visible,
+select:focus-visible,
+input:focus-visible,
+[tabindex]:focus-visible {
+    outline: 2px solid #0073e6;
+    outline-offset: 2px;
+    border-radius: 6px;
+}
+
+/* --- (4) Toolbar: input flexible + tabs a la derecha, misma linea --- */
+.toolbar {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    /* Aire arriba y abajo para que el input no quede pegado a lo siguiente */
+    padding: 4px 0 20px;
+}
+
+/* En la biblioteca el input se muda a #library-main y la toolbar queda vacia.
+   `:empty` no sirve aqui porque quedan nodos de texto en blanco, asi que la
+   clase la pone moveSearchInput(). */
+.toolbar.is-empty { display: none; }
+
+.toolbar-search { flex: 1 1 auto; min-width: 0; }
+
+@media (max-width: 767px) {
+    /* En movil el input va arriba y los tabs abajo */
+    .toolbar { flex-direction: column; align-items: stretch; gap: 12px; }
+    .segmented { justify-content: center; }
+}
+
+/* --- Segmented control --- */
+.segmented {
+    display: inline-flex;
+    flex-shrink: 0;
+    padding: 4px;
+    gap: 4px;
+    background: #f4f4f5;
+    border: 1px solid #e4e4e7;
+    border-radius: 10px;
+}
+
+.segmented .ct-tab {
+    padding: 6px 16px;
+    border: 0;
+    border-radius: 7px;
+    font-size: 0.875rem;
+    font-weight: 500;
+    color: #52525b;
+    background: transparent;
+    white-space: nowrap;
+    cursor: pointer;
+    transition: background .15s, color .15s, box-shadow .15s;
+}
+
+.segmented .ct-tab:hover:not(.ct-active) { background: #e4e4e7; color: #18181b; }
+
+.segmented .ct-tab.ct-active {
+    background: #0073e6;
+    color: #fff;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, .12);
+}
+
+/* --- Selects de control, mismo aspecto en las dos barras --- */
+.ctl-select {
+    padding: 4px 8px;
+    font-size: 0.875rem;
+    color: #3f3f46;
+    background: #fff;
+    border: 1px solid #e4e4e7;
+    border-radius: 8px;
+    cursor: pointer;
+    transition: border-color .15s;
+}
+
+.ctl-select:hover { border-color: #d4d4d8; }
+
+/* --- (3) Empty state y sugerencias --- */
+.suggest-chip {
+    padding: 6px 14px;
+    font-size: 0.8125rem;
+    color: #3f3f46;
+    background: #fff;
+    border: 1px solid #e4e4e7;
+    border-radius: 999px;
+    cursor: pointer;
+    transition: background .15s, border-color .15s, color .15s;
+}
+
+.suggest-chip:hover { background: #e8f4fc; border-color: #0073e6; color: #0073e6; }
+
+/* --- (3) Skeletons: mismo cuadrado que un tile, para no mover nada --- */
+.skeleton-tile {
+    aspect-ratio: 1 / 1;
+    border-radius: 12px;
+    border: 1px solid #e4e4e7;
+    background: linear-gradient(100deg, #f4f4f5 30%, #ececee 50%, #f4f4f5 70%);
+    background-size: 200% 100%;
+    animation: skeleton-sweep 1.2s ease-in-out infinite;
+}
+
+@keyframes skeleton-sweep {
+    from { background-position: 180% 0; }
+    to   { background-position: -20% 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .skeleton-tile { animation: none; }
+}
+
+/* --- (2) Biblioteca: sidebar fijo, solo el main scrollea --- */
+#library-view { display: none; gap: 24px; }
+#library-view.is-open { display: flex; }
+
+#library-sidebar {
+    width: 260px;
+    flex: 0 0 260px;
+    /* Sticky + altura de viewport: el sidebar se queda quieto y su propio
+       contenido scrollea si hay muchos facets. El header mide 64px. */
+    position: sticky;
+    top: 88px;
+    align-self: flex-start;
+    max-height: calc(100vh - 112px);
+    overflow-y: auto;
+    padding-right: 20px;
+    /* La separacion se lee a simple vista, no solo por el espacio */
+    border-right: 1px solid #e4e4e7;
+}
+
+#library-main { flex: 1 1 auto; }
+
+.sidebar-toggle {
+    display: none;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 16px;
+    padding: 8px 12px;
+    font-size: 0.875rem;
+    font-weight: 500;
+    color: #3f3f46;
+    background: #fff;
+    border: 1px solid #e4e4e7;
+    border-radius: 8px;
+    cursor: pointer;
+}
+
+.sidebar-toggle:hover { background: #fafafa; }
+
+.sidebar-count {
+    padding: 1px 7px;
+    border-radius: 999px;
+    background: #0073e6;
+    color: #fff;
+    font-size: 0.6875rem;
+    font-weight: 700;
+}
+
+@media (max-width: 1023px) {
+    /* Colapsable: el sidebar deja de ser columna y se despliega arriba */
+    #library-view.is-open { flex-direction: column; }
+    .sidebar-toggle { display: inline-flex; }
+    #library-sidebar {
+        display: none;
+        width: 100%;
+        flex: none;
+        position: static;
+        max-height: none;
+        padding: 16px;
+        margin-bottom: 16px;
+        border: 1px solid #e4e4e7;
+        border-radius: 12px;
+    }
+    #library-sidebar.is-expanded { display: block; }
+}
+
+/* --- (5) Menu de acciones por card --- */
+/* El boton de tres puntos ocupa la esquina superior derecha, asi que los
+   cintillos de formato se mueven a la izquierda para no solaparse. */
+#library-grid .tile-formats { right: auto; left: 6px; align-items: flex-start; }
+
+.card-menu { position: absolute; top: 6px; right: 6px; z-index: 3; }
+
+.card-menu-btn {
+    display: grid;
+    place-items: center;
+    width: 28px;
+    height: 28px;
+    border-radius: 8px;
+    border: 0;
+    color: #fff;
+    background: rgba(9, 9, 11, .55);
+    cursor: pointer;
+    opacity: 0;
+    transition: opacity .15s, background .15s;
+}
+
+.book-card:hover .card-menu-btn,
+.card-menu-btn:focus-visible,
+.card-menu.is-open .card-menu-btn { opacity: 1; }
+
+.card-menu-btn:hover { background: rgba(9, 9, 11, .8); }
+
+.card-menu-list {
+    display: none;
+    position: absolute;
+    top: 32px;
+    right: 0;
+    min-width: 208px;
+    padding: 4px;
+    background: #fff;
+    border: 1px solid #e4e4e7;
+    border-radius: 10px;
+    box-shadow: 0 12px 28px rgba(0, 0, 0, .18);
+}
+
+.card-menu.is-open .card-menu-list { display: block; }
+
+.card-menu-list button {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    padding: 8px 10px;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    font-size: 0.8125rem;
+    color: #3f3f46;
+    text-align: left;
+    cursor: pointer;
+}
+
+.card-menu-list button:hover { background: #f4f4f5; }
+.card-menu-list button.is-danger { color: #d4002d; }
+.card-menu-list button.is-danger:hover { background: #fef2f2; }
+
+/* Favorito: marca persistente en la esquina inferior derecha */
+.fav-star {
+    position: absolute;
+    right: 6px;
+    bottom: 6px;
+    z-index: 2;
+    font-size: 0.75rem;
+    color: #fbbf24;
+    text-shadow: 0 1px 3px rgba(0, 0, 0, .5);
+    pointer-events: none;
+}
+
+/* --- Modo oscuro de lo anterior --- */
+.dark .segmented { background: #1e1e23; border-color: #2f2f37; }
+.dark .segmented .ct-tab { color: #a1a1ab; background: transparent; }
+.dark .segmented .ct-tab:hover:not(.ct-active) { background: #2f2f37; color: #f4f4f5; }
+.dark .ctl-select { background: #1e1e23; color: #e4e4e7; border-color: #2f2f37; }
+.dark .suggest-chip { background: #1e1e23; color: #d4d4d8; border-color: #2f2f37; }
+.dark .suggest-chip:hover { background: #10304a; border-color: #0073e6; color: #7cc4fa; }
+.dark .skeleton-tile {
+    border-color: #2f2f37;
+    background: linear-gradient(100deg, #1e1e23 30%, #26262c 50%, #1e1e23 70%);
+    background-size: 200% 100%;
+}
+.dark #library-sidebar { border-right-color: #2f2f37; }
+.dark .sidebar-toggle { background: #1e1e23; color: #d4d4d8; border-color: #2f2f37; }
+.dark .sidebar-toggle:hover { background: #26262c; }
+.dark .card-menu-list { background: #1e1e23; border-color: #2f2f37; box-shadow: 0 12px 28px rgba(0,0,0,.55); }
+.dark .card-menu-list button { color: #d4d4d8; }
+.dark .card-menu-list button:hover { background: #2f2f37; }
+.dark .card-menu-list button.is-danger { color: #f87171; }
+.dark .card-menu-list button.is-danger:hover { background: #3b1417; }
+
+@media (max-width: 1023px) {
+    .dark #library-sidebar { border-color: #2f2f37; }
+}
+
+
+/* =====================================================================
+   Navbar en el header + input anclado en la biblioteca
+   ===================================================================== */
+
+.main-nav {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    flex-shrink: 0;
+    /* Sin overflow: con un unico boton y el subrayado desbordando hacia abajo,
+       `overflow-x: auto` provocaba barras de scroll dentro del nav. */
+    overflow: visible;
+}
+
+/* En .main-nav solo vive "Mi biblioteca". Su aspecto esta en .nav-btn mas
+   abajo; aqui solo lo comun a cualquier boton del navbar. */
+.main-nav .ct-tab {
+    white-space: nowrap;
+    cursor: pointer;
+    transition: background .15s, border-color .15s, color .15s;
+}
+
+@media (max-width: 767px) {
+    /* `display: contents` disuelve el envoltorio logo+nav para que ambos pasen
+       a ser hijos directos del flex del header. Asi el nav puede irse a una
+       segunda fila completa; anidado se comprimia a ~90px de ancho. */
+    /* Con el nav en su propia fila el header crece: se recorta el padding
+       vertical para que no se coma la pantalla en movil. */
+    header > div { flex-wrap: wrap; row-gap: 6px; padding-top: 8px; padding-bottom: 6px; }
+    header > div > div:first-child { display: contents; }
+    .main-nav { order: 3; width: 100%; justify-content: space-between; }
+    .main-nav .ct-tab { padding: 6px 10px; font-size: 0.875rem; }
+}
+
+
+
+/* --- Input anclado dentro de library-main ---
+   Al entrar en la biblioteca el input se mueve por JS a #library-main. Aqui
+   se queda pegado arriba con `sticky`: el contenido pasa por debajo y el
+   input nunca se mueve. `sticky` no tiene el efecto de ocultarse al bajar y
+   reaparecer al subir, que es justo lo que no queriamos. */
+.toolbar-search.is-docked {
+    position: sticky;
+    top: 72px;                  /* altura real del header sticky */
+    z-index: 20;
+    padding: 16px 0 12px;
+    margin-bottom: 4px;
+    /* Fondo opaco: sin esto las tarjetas se verian por debajo al scrollear */
+    background: #fff;
+}
+
+/* El sidebar arranca a la altura del input anclado, no del header */
+#library-view.is-open #library-sidebar { top: 148px; max-height: calc(100vh - 172px); }
+
+.dark .toolbar-search.is-docked { background: #17171b; }
+
+@media (max-width: 1023px) {
+    /* Sin columna fija el input no necesita quedarse pegado */
+    .toolbar-search.is-docked { position: static; padding: 0 0 12px; }
+    #library-view.is-open #library-sidebar { top: auto; max-height: none; }
+}
+
+
+/* ===== "Mi biblioteca": boton propio del navbar =====
+   No es una pestania del buscador (esas viven junto al input), asi que se
+   distingue como boton: contorno definido y relleno azul cuando esta activo. */
+.main-nav .nav-btn {
+    padding: 7px 14px;
+    border: 1px solid #d4d4d8;
+    border-radius: 8px;
+    background: #fafafa;
+    font-size: 0.875rem;
+    font-weight: 500;
+    color: #3f3f46;
+}
+
+.main-nav .nav-btn:hover {
+    background: #f4f4f5;
+    border-color: #a1a1aa;
+    color: #18181b;
+}
+
+.main-nav .nav-btn.ct-active {
+    background: #0073e6;
+    border-color: #0073e6;
+    color: #fff;
+    font-weight: 600;
+}
+
+.main-nav .nav-btn.ct-active:hover { background: #005bb5; border-color: #005bb5; }
+
+/* Selector por ID: hay un unico boton "Mi biblioteca" y el estado activo debe
+   ganar siempre. Con selectores de clase competia con los estilos generales
+   de .ct-tab (heredados de cuando los tres tabs vivian aqui) y el relleno no
+   se aplicaba. El ID elimina la ambiguedad. */
+#ct-library.ct-active,
+.dark #ct-library.ct-active {
+    background: #0073e6;
+    border-color: #0073e6;
+    color: #fff;
+    font-weight: 600;
+}
+
+#ct-library.ct-active:hover,
+.dark #ct-library.ct-active:hover { background: #005bb5; border-color: #005bb5; }
+
+.dark .main-nav .nav-btn {
+    background: #1e1e23;
+    border-color: #3f3f4a;
+    color: #d4d4d8;
+}
+
+.dark .main-nav .nav-btn:hover { background: #26262c; border-color: #52525b; color: #f4f4f5; }
+
+.dark .main-nav .nav-btn.ct-active {
+    background: #0073e6;
+    border-color: #0073e6;
+    color: #fff;
+}
+
+@media (max-width: 767px) {
+    /* Con un solo boton no hace falta la fila completa ni repartirlo */
+    .main-nav { order: 0; width: auto; justify-content: flex-start; }
+    header > div > div:first-child { display: flex; }
+    .main-nav .nav-btn { padding: 6px 10px; font-size: 0.8125rem; }
+}
+
+
+/* ===== Volver al inicio =====
+   En la biblioteca la toolbar se oculta (el input se muda a library-main) y con
+   ella desaparecen Libros/Audiolibros: sin esto no habia forma de volver. */
+.home-link {
+    padding: 4px 8px;
+    margin-left: -8px;
+    border: 0;
+    border-radius: 8px;
+    background: transparent;
+    cursor: pointer;
+    transition: background .15s;
+}
+
+.home-link:hover { background: #f4f4f5; }
+.dark .home-link:hover { background: #26262c; }

@@ -1,0 +1,360 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>O'Reilly Ingest</title>
+
+    <!-- Fonts: Editorial pairing -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+
+    <!-- Tailwind CSS -->
+    <script>
+        // Se resuelve antes del primer paint: si esto fuera al final del body
+        // se veria un destello blanco al cargar en modo oscuro.
+        (function () {
+            var saved = null;
+            try { saved = localStorage.getItem('theme'); } catch (e) { /* modo privado */ }
+            var dark = saved
+                ? saved === 'dark'
+                : window.matchMedia('(prefers-color-scheme: dark)').matches;
+            if (dark) document.documentElement.classList.add('dark');
+        })();
+    </script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    colors: {
+                        'oreilly': {
+                            red: '#d4002d',
+                            'red-dark': '#a80024',
+                            blue: '#0073e6',
+                            'blue-dark': '#005bb5',
+                            'blue-light': '#e8f4fc',
+                        },
+                        'surface': {
+                            50: '#fafafa',
+                            100: '#f4f4f5',
+                            200: '#e4e4e7',
+                            300: '#d4d4d8',
+                        }
+                    },
+                    fontFamily: {
+                        'sans': ['DM Sans', 'system-ui', '-apple-system', 'sans-serif'],
+                        'mono': ['JetBrains Mono', 'ui-monospace', 'monospace'],
+                    },
+                    animation: {
+                        'fade-in': 'fadeIn 0.2s ease-out',
+                        'slide-down': 'slideDown 0.25s ease-out',
+                        'shake': 'shake 0.4s ease',
+                        'pulse-subtle': 'pulseSubtle 2s ease-in-out infinite',
+                    },
+                    keyframes: {
+                        fadeIn: {
+                            '0%': { opacity: '0' },
+                            '100%': { opacity: '1' },
+                        },
+                        slideDown: {
+                            '0%': { opacity: '0', transform: 'translateY(-8px)' },
+                            '100%': { opacity: '1', transform: 'translateY(0)' },
+                        },
+                        shake: {
+                            '0%, 100%': { transform: 'translateX(0)' },
+                            '25%': { transform: 'translateX(-4px)' },
+                            '75%': { transform: 'translateX(4px)' },
+                        },
+                        pulseSubtle: {
+                            '0%, 100%': { opacity: '1' },
+                            '50%': { opacity: '0.7' },
+                        },
+                    },
+                    boxShadow: {
+                        'card': '0 1px 3px rgba(0,0,0,0.08)',
+                        'card-hover': '0 4px 12px rgba(0,0,0,0.1)',
+                        'card-expanded': '0 8px 30px rgba(0,0,0,0.12)',
+                        'inner-soft': 'inset 0 1px 2px rgba(0,0,0,0.06)',
+                    }
+                }
+            }
+        }
+    </script>
+
+    <link rel="stylesheet" href="style.css">
+</head>
+<body class="min-h-screen flex flex-col bg-white font-sans text-zinc-900 antialiased">
+    <!-- Header -->
+    <header class="bg-white/95 backdrop-blur-sm border-b border-zinc-100 sticky top-0 z-40">
+        <div class="max-w-[1440px] mx-auto px-4 sm:px-6 py-4 flex items-center justify-between">
+            <div class="flex items-center gap-6 min-w-0">
+                <button id="home-link" class="home-link flex items-baseline gap-2 flex-shrink-0" aria-label="Ir al inicio">
+                    <span class="text-[1.625rem] font-bold tracking-tight text-oreilly-red">O'REILLY</span>
+                    <span class="text-base font-medium text-zinc-300 hidden sm:inline">Ingest</span>
+                </button>
+                <!-- Navegacion principal: botones normales, no segmented control -->
+                <nav class="main-nav" aria-label="Secciones">
+                    <button id="ct-library" data-ct="library" class="ct-tab nav-btn">Mi biblioteca</button>
+                </nav>
+            </div>
+            <div class="flex items-center gap-4">
+                <div id="auth-status" class="flex items-center gap-2 text-sm text-zinc-500">
+                    <span class="status-dot w-2 h-2 rounded-full bg-zinc-300"></span>
+                    <span class="status-text">Checking...</span>
+                </div>
+                <button id="login-btn" class="hidden px-4 py-2 text-sm font-medium text-oreilly-red border border-oreilly-red/30 rounded-lg hover:bg-oreilly-red/5 transition-colors duration-150">
+                    Set Cookies
+                </button>
+                <button id="theme-toggle" class="p-2 rounded-lg text-zinc-400 hover:text-zinc-700 hover:bg-zinc-100 transition-colors" title="Cambiar tema" aria-label="Cambiar tema">
+                    <svg class="theme-icon-sun w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <circle cx="12" cy="12" r="4"/>
+                        <path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/>
+                    </svg>
+                    <svg class="theme-icon-moon w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/>
+                    </svg>
+                </button>
+                <button id="settings-btn" class="p-2 rounded-lg text-zinc-400 hover:text-zinc-700 hover:bg-zinc-100 transition-colors" title="Ajustes" aria-label="Ajustes" aria-haspopup="dialog">
+                    <svg class="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <circle cx="12" cy="12" r="3"/>
+                        <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+                    </svg>
+                </button>
+            </div>
+        </div>
+    </header>
+
+    <!-- Main Content -->
+    <main class="flex-1 w-full max-w-[1440px] mx-auto px-4 sm:px-6 py-8">
+        <!-- Search Section -->
+        <section class="mb-8">
+          <div class="toolbar">
+            <div class="relative group toolbar-search">
+                <div class="absolute left-4 top-1/2 -translate-y-1/2 text-zinc-400 transition-colors group-focus-within:text-oreilly-blue">
+                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/>
+                    </svg>
+                </div>
+                <input
+                    type="text"
+                    id="search-input"
+                    placeholder="Search by title, author, or ISBN..."
+                    class="w-full pl-12 pr-12 py-4 text-base bg-surface-50 border border-zinc-200 rounded-xl placeholder:text-zinc-400 focus:outline-none focus:bg-white focus:border-oreilly-blue focus:ring-4 focus:ring-oreilly-blue/10 transition-all duration-200"
+                    autocomplete="off"
+                >
+                <div id="search-loader" class="hidden absolute right-4 top-1/2 -translate-y-1/2">
+                    <svg class="animate-spin h-5 w-5 text-oreilly-blue" viewBox="0 0 24 24">
+                        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" fill="none"/>
+                        <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"/>
+                    </svg>
+                </div>
+            </div>
+            <!-- Tipo de busqueda por API: acompania al input -->
+            <div class="segmented" role="tablist" aria-label="Tipo de contenido">
+                <button id="ct-book" data-ct="book" role="tab" aria-selected="true" class="ct-tab ct-active">Libros</button>
+                <button id="ct-audiobook" data-ct="audiobook" role="tab" aria-selected="false" class="ct-tab">Audiolibros</button>
+            </div>
+          </div>
+
+        </section>
+
+        <!-- Visor de biblioteca local: sidebar de facets + grid -->
+        <!-- La visibilidad la controla .is-open (ver style.css); sin estilo inline
+             porque ganaria a la clase -->
+        <div id="library-view">
+            <!-- Debajo de 1024px el sidebar se colapsa tras este boton -->
+            <button id="sidebar-toggle" class="sidebar-toggle" aria-expanded="false" aria-controls="library-sidebar">
+                <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M4 6h16M7 12h10M10 18h4"/>
+                </svg>
+                <span>Filtros</span>
+                <span id="sidebar-count" class="sidebar-count hidden"></span>
+            </button>
+
+            <aside id="library-sidebar">
+                <div class="flex items-center justify-between mb-4">
+                    <span class="text-[0.6875rem] font-semibold uppercase tracking-wide text-zinc-400">Filtros</span>
+                    <button id="library-clear" class="hidden text-xs text-oreilly-blue hover:underline">Limpiar</button>
+                </div>
+                <div id="library-facets" class="space-y-4"></div>
+                <button id="library-refresh" class="mt-6 w-full px-3 py-2 text-xs font-medium text-zinc-600 bg-white border border-zinc-200 rounded-lg hover:bg-zinc-50 transition-colors">
+                    Reindexar carpeta
+                </button>
+            </aside>
+            <div id="library-main" class="min-w-0">
+                <div class="flex items-center justify-between gap-3 flex-wrap mb-3 px-1">
+                    <div class="flex items-baseline gap-2">
+                        <span id="library-count" class="text-sm text-zinc-500"></span>
+                        <span id="library-size" class="text-xs text-zinc-400"></span>
+                    </div>
+                    <label class="flex items-center gap-1.5 text-sm text-zinc-500">
+                        Ordenar
+                        <select id="library-sort" class="ctl-select">
+                            <option value="title">Título (A-Z)</option>
+                            <option value="title_desc">Título (Z-A)</option>
+                            <option value="year">Año (más reciente)</option>
+                            <option value="year_asc">Año (más antiguo)</option>
+                            <option value="size">Tamaño (mayor)</option>
+                            <option value="added">Descargado (reciente)</option>
+                        </select>
+                    </label>
+                </div>
+                <div id="transfer-bar" class="hidden flex items-center justify-between gap-3 flex-wrap mb-3 px-3 py-2.5 rounded-lg bg-amber-50 border border-amber-200">
+                    <span id="transfer-msg" class="text-sm text-amber-800"></span>
+                    <button id="transfer-all-btn" class="btn-transfer">Transferir todas</button>
+                </div>
+                <div id="library-grid" class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-4"></div>
+                <div id="library-empty" class="hidden text-center py-16 text-zinc-500"></div>
+            </div>
+        </div>
+
+        <!-- Filtros de la CONSULTA, justo debajo del input: van a la API, asi que
+             deben poder elegirse ANTES de buscar. Visibles en todos los estados
+             para que su posicion no cambie al aparecer los resultados. -->
+        <div id="results-bar" class="flex items-center justify-between gap-4 flex-wrap mb-4">
+            <span id="results-count" class="text-sm text-zinc-500"></span>
+            <div class="flex items-center gap-3 flex-wrap text-sm">
+                <label class="flex items-center gap-1.5 text-zinc-500">
+                    Idioma
+                    <select id="filter-language" class="ctl-select">
+                        <option value="">Todos</option>
+                    </select>
+                </label>
+                <label class="flex items-center gap-1.5 text-zinc-500">
+                    Ordenar
+                    <select id="filter-sort" class="ctl-select">
+                        <option value="relevance">Relevancia</option>
+                        <option value="popularity">Popularidad</option>
+                        <option value="publication_date">Fecha de publicación</option>
+                        <option value="title">Título</option>
+                    </select>
+                </label>
+                <label class="flex items-center gap-1.5 text-zinc-500">
+                    Por página
+                    <select id="per-page" class="ctl-select">
+                        <option value="10">10</option>
+                        <option value="25" selected>25</option>
+                        <option value="50">50</option>
+                        <option value="100">100</option>
+                    </select>
+                </label>
+                <button id="clear-filters" class="hidden text-xs text-oreilly-blue hover:underline">Limpiar filtros</button>
+            </div>
+        </div>
+
+        <!-- Estado vacio: ocupa el sitio de la grilla para que nada se mueva -->
+        <div id="search-empty" class="py-16 text-center">
+            <p class="text-base text-zinc-600">Busca un libro por titulo, autor o ISBN.</p>
+            <p class="mt-2 text-sm text-zinc-400">Prueba con una de estas:</p>
+            <div class="mt-4 flex items-center justify-center gap-2 flex-wrap">
+                <button class="suggest-chip" data-q="kubernetes">kubernetes</button>
+                <button class="suggest-chip" data-q="python">python</button>
+                <button class="suggest-chip" data-q="in action">in action</button>
+                <button class="suggest-chip" data-q="machine learning">machine learning</button>
+            </div>
+        </div>
+
+        <!-- Barra de resultados: conteo a la izquierda, controles a la derecha -->
+        <section id="search-results" class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4">
+            <!-- Results populated by JavaScript -->
+        </section>
+
+        <div id="load-more-wrap" class="hidden pt-4 text-center">
+            <button id="load-more" class="px-5 py-2.5 text-sm font-medium text-oreilly-blue bg-white border border-oreilly-blue/30 rounded-lg hover:bg-oreilly-blue/5 transition-colors">
+                Cargar más
+            </button>
+            <p id="load-more-hint" class="mt-2 text-xs text-zinc-400"></p>
+        </div>
+    </main>
+
+    <!-- Fondo oscuro de la tarjeta expandida -->
+    <div id="card-backdrop" class="hidden"></div>
+
+    <!-- Cookie Modal -->
+    <div id="cookie-modal" class="hidden fixed inset-0 z-50 overflow-y-auto">
+        <div class="min-h-screen px-4 flex items-center justify-center">
+            <!-- Backdrop -->
+            <div class="fixed inset-0 bg-zinc-900/60 backdrop-blur-sm transition-opacity"></div>
+
+            <!-- Modal -->
+            <div class="relative bg-white rounded-2xl shadow-2xl max-w-lg w-full p-7 transform transition-all animate-slide-down">
+                <h3 class="text-xl font-semibold text-zinc-900 mb-5">Set Session Cookies</h3>
+
+                <div class="space-y-4 text-zinc-600 mb-6">
+                    <p class="font-medium text-zinc-800">Follow these steps:</p>
+                    <ol class="list-decimal list-inside space-y-2 text-sm leading-relaxed">
+                        <li>Open <a href="https://learning.oreilly.com" target="_blank" class="text-oreilly-blue hover:underline font-medium">learning.oreilly.com</a> and log in</li>
+                        <li>Open browser console <kbd class="px-1.5 py-0.5 bg-zinc-100 rounded text-xs font-mono">F12</kbd> → Console</li>
+                        <li>Paste this command and press Enter:</li>
+                    </ol>
+                    <pre class="bg-zinc-900 text-zinc-100 text-xs p-4 rounded-xl overflow-x-auto font-mono leading-relaxed"><code>JSON.stringify(document.cookie.split(';').map(c=>c.split('=')).reduce((r,[k,v])=>({...r,[k.trim()]:v?.trim()}),{}))</code></pre>
+                    <p class="text-sm">Copy the output and paste below:</p>
+                </div>
+
+                <textarea
+                    id="cookie-input"
+                    placeholder='{"cookie_name": "value", ...}'
+                    class="w-full h-28 px-4 py-3 border border-zinc-200 rounded-xl font-mono text-sm resize-none focus:outline-none focus:border-oreilly-blue focus:ring-4 focus:ring-oreilly-blue/10 transition-all duration-200"
+                ></textarea>
+
+                <p id="cookie-error" class="hidden mt-3 text-sm text-red-600 font-medium"></p>
+
+                <div class="flex justify-end gap-3 mt-6">
+                    <button id="cancel-modal-btn" class="px-5 py-2.5 text-zinc-600 hover:bg-zinc-100 rounded-lg font-medium transition-colors duration-150">
+                        Cancel
+                    </button>
+                    <button id="save-cookies-btn" class="px-5 py-2.5 bg-oreilly-blue hover:bg-oreilly-blue-dark text-white rounded-lg font-medium transition-colors duration-150">
+                        Save Cookies
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Ajustes globales -->
+    <div id="settings-modal" class="hidden fixed inset-0 z-50 overflow-y-auto" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+        <div class="min-h-screen px-4 flex items-center justify-center">
+            <div class="fixed inset-0 bg-zinc-900/60 backdrop-blur-sm transition-opacity" data-close-settings></div>
+
+            <div class="relative bg-white rounded-2xl shadow-2xl max-w-lg w-full p-7 transform transition-all animate-slide-down">
+                <h3 id="settings-title" class="text-xl font-semibold text-zinc-900 mb-1">Ajustes</h3>
+                <p class="text-sm text-zinc-500 mb-6">Se aplican a todas las descargas y se guardan entre sesiones.</p>
+
+                <div class="space-y-6">
+                    <div>
+                        <label for="settings-library-dir" class="block text-[0.6875rem] font-semibold uppercase tracking-wide text-zinc-400 mb-2">Carpeta de la biblioteca</label>
+                        <div class="flex gap-2">
+                            <input id="settings-library-dir" type="text" class="flex-1 px-3 py-2 text-sm font-mono bg-zinc-50 border border-zinc-200 rounded-lg text-zinc-600" placeholder="Cargando..." readonly>
+                            <button id="settings-browse-btn" class="px-3 py-2 text-xs font-medium text-zinc-600 bg-white border border-zinc-300 rounded-lg hover:bg-zinc-50 transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-oreilly-blue">Examinar</button>
+                        </div>
+                        <p id="settings-library-state" class="hidden mt-2 text-xs font-medium"></p>
+                        <p class="mt-2 text-xs text-zinc-400 leading-relaxed">Todo se descarga primero en <span class="font-mono" id="settings-cache-dir">output/</span> y de ahí pasa a esta carpeta, con su estructura propia. Si no eliges ninguna se queda en <span class="font-mono">output/library</span>.</p>
+                        <button type="button" id="settings-reset-btn" class="hidden mt-2 text-xs font-medium text-oreilly-blue hover:underline rounded focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-oreilly-blue">Volver a la carpeta por defecto</button>
+                    </div>
+
+                    <div>
+                        <p class="text-[0.6875rem] font-semibold uppercase tracking-wide text-zinc-400 mb-2">Descargas</p>
+                        <label class="flex items-start gap-2 cursor-pointer py-1">
+                            <input id="settings-transfer-after" type="checkbox" class="w-4 h-4 mt-0.5 rounded border-zinc-300 text-oreilly-blue focus:ring-oreilly-blue/20">
+                            <span>
+                                <span class="text-sm text-zinc-600">Pasar a la biblioteca al terminar</span>
+                                <span class="block text-xs text-zinc-400">Sin marcar, lo descargado se queda en la caché y lo pasas cuando quieras desde el visor.</span>
+                            </span>
+                        </label>
+                    </div>
+                </div>
+
+                <div class="flex items-center justify-between gap-3 mt-7">
+                    <span id="settings-saved" class="text-xs text-emerald-600 opacity-0 transition-opacity">Guardado</span>
+                    <button id="settings-close-btn" class="px-5 py-2.5 text-zinc-600 hover:bg-zinc-100 rounded-lg font-medium transition-colors duration-150">Cerrar</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>
