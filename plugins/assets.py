@@ -6,13 +6,20 @@ from .base import Plugin
 
 
 class AssetsPlugin(Plugin):
+    # Saltar lo que ya existe es lo que permite reanudar una descarga cortada.
+    # Para que eso sea seguro, la escritura tiene que ser atomica: si el proceso
+    # muere a mitad de un write, el archivo truncado quedaria en disco y el
+    # reintento lo daria por bueno. Se escribe a .part y se renombra.
+
     def download_image(self, url: str, save_path: Path) -> bool:
         if save_path.exists():
             return True
 
         save_path.parent.mkdir(parents=True, exist_ok=True)
         content = self.http.get_bytes(url)
-        save_path.write_bytes(content)
+        tmp = save_path.parent / (save_path.name + ".part")
+        tmp.write_bytes(content)
+        tmp.replace(save_path)
         return True
 
     def download_css(self, url: str, save_path: Path) -> bool:
@@ -21,7 +28,9 @@ class AssetsPlugin(Plugin):
 
         save_path.parent.mkdir(parents=True, exist_ok=True)
         content = self.http.get_text(url)
-        save_path.write_text(content, encoding='utf-8')
+        tmp = save_path.parent / (save_path.name + ".part")
+        tmp.write_text(content, encoding='utf-8')
+        tmp.replace(save_path)
         return True
 
     def download_all_images(

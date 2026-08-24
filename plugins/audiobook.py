@@ -37,6 +37,14 @@ KALTURA_CDN = "https://cdnapisec.kaltura.com"
 CHUNK_BYTES = 1 << 20  # 1 MiB
 
 
+def _as_int(value):
+    """Numero o None. La API mezcla enteros y cadenas en los mismos campos."""
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return None
+
+
 @dataclass
 class AudiobookChapter:
     """Un capitulo de audiolibro, ya resuelto a su entry de Kaltura."""
@@ -204,8 +212,13 @@ class AudiobookPlugin(Plugin):
         return written
 
     @staticmethod
-    def _write_sidecar(book_dir: Path, info: dict) -> None:
-        """Guarda la metadata del audiolibro para el visor local."""
+    def _write_sidecar(book_dir: Path, info: dict, chapters=None) -> None:
+        """Guarda la metadata del audiolibro para el visor local.
+
+        Incluye los titulos de los capitulos: los archivos se renombran a
+        001.m4a al publicar, asi que si no se guardan aqui el reproductor solo
+        puede mostrar numeros.
+        """
         date = info.get("publication_date") or ""
         payload = {
             "title": info.get("title"),
@@ -216,7 +229,16 @@ class AudiobookPlugin(Plugin):
             "year": date[:4] if len(date) >= 4 and date[:4].isdigit() else None,
             "isbn": info.get("id"),
             "content_type": "audiobook",
-            "duration_seconds": info.get("duration_seconds"),
+            # La API lo devuelve como texto; se guarda numerico para poder
+            # comparar contra lo que hay realmente en disco.
+            "duration_seconds": _as_int(info.get("duration_seconds")),
+            # Cuantas pistas DEBERIA tener. Sin esto no habia forma de saber
+            # que una descarga cortada quedo a medias.
+            "expected_tracks": len(chapters or []),
+            "chapters": [
+                {"n": n, "title": ch.title, "duration": ch.duration}
+                for n, ch in enumerate(chapters or [], start=1)
+            ],
         }
         (book_dir / "library.json").write_text(
             json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8"
@@ -272,7 +294,7 @@ class AudiobookPlugin(Plugin):
 
         # Sidecar de metadata: los .m4a no llevan etiquetas, asi que sin esto
         # el visor de biblioteca no tendria titulo, autor, idioma ni año.
-        self._write_sidecar(book_dir, info)
+        self._write_sidecar(book_dir, info, chapters)
         self._save_cover(book_dir, book_id)
 
         result = AudiobookResult(

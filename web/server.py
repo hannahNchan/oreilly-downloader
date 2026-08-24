@@ -55,6 +55,9 @@ class DownloaderHandler(SimpleHTTPRequestHandler):
     def do_GET(self):
         parsed = urlparse(self.path)
         path = parsed.path
+        # La conexion se reutiliza entre peticiones (keep-alive), asi que el
+        # flag de "esto es media" hay que limpiarlo en cada una.
+        self._media_response = False
 
         if path == "/api/status":
             self._handle_status()
@@ -89,6 +92,12 @@ class DownloaderHandler(SimpleHTTPRequestHandler):
         elif path == "/api/library/transfer":
             with self._transfer_lock:
                 self._send_json(dict(self.transfer_progress))
+        elif match := re.match(r"/api/library/tracks/(.+)$", path):
+            self._handle_library_tracks(unquote(match.group(1)))
+        elif match := re.match(r"/api/library/audio/(.+)/(\d+)$", path):
+            self._handle_library_audio(unquote(match.group(1)), int(match.group(2)))
+        elif match := re.match(r"/api/library/file/(.+)/(epub|pdf)$", path):
+            self._handle_library_file(unquote(match.group(1)), match.group(2))
         elif match := re.match(r"/api/library/cover/(.+)$", path):
             self._handle_library_cover(unquote(match.group(1)))
         else:
@@ -99,9 +108,14 @@ class DownloaderHandler(SimpleHTTPRequestHandler):
 
         Without this, an edited app.js/style.css keeps being served from the
         browser cache and the UI silently runs stale code after a change.
+
+        Portadas y audio quedan fuera: ahi el no-store es contraproducente —
+        cada vez que mueves la barra del reproductor el navegador pide otro
+        rango, y sin cache se vuelve a traer el archivo entero.
         """
         super().send_response(code, message)
-        self.send_header("Cache-Control", "no-store, must-revalidate")
+        if not getattr(self, "_media_response", False):
+            self.send_header("Cache-Control", "no-store, must-revalidate")
 
     def do_OPTIONS(self):
         """Answer CORS preflight so browser clients can POST cookies/JSON."""
@@ -296,6 +310,138 @@ class DownloaderHandler(SimpleHTTPRequestHandler):
             return
         self._send_json({"success": True, "saved": saved})
 
+    def _library_item(self, folder: str) -> dict | None:
+        """Busca una obra por su `folder` en el indice ya construido.
+
+        El nombre de la URL solo se usa para comparar, nunca para armar una
+        ruta: la ruta sale del indice, asi que no hay forma de escapar de la
+        biblioteca con un `..`.
+        """
+        return next(
+            (i for i in self.kernel["library"].scan() if i.get("folder") == folder),
+            None,
+        )
+
+    def _handle_library_tracks(self, folder: str):
+        """Pistas de un audiolibro, en orden, para el reproductor."""
+        item = self._library_item(folder)
+        if item is None:
+            self._send_json({"error": "not found"}, 404)
+            return
+
+        library = self.kernel["library"]
+        tracks = library.tracks_for(item)
+        self._send_json({
+            "folder": folder,
+            "title": item.get("title"),
+            "authors": item.get("authors") or [],
+            "year": item.get("year"),
+            "cover_url": item.get("cover_url"),
+            "content_type": item.get("content_type"),
+            # Para que el reproductor pueda decir si la descarga quedo a medias:
+            # duracion que deberia tener y cuantas pistas se esperaban.
+            "duration_seconds": item.get("duration_seconds"),
+            "expected_tracks": item.get("expected_tracks"),
+            # `titled` en falso significa que la obra se descargo antes de que
+            # se guardaran los nombres de capitulo: la UI lo dice en vez de
+            # inventarlos.
+            "tracks": [dict(t, url=f"/api/library/audio/{folder}/{t['n']}")
+                       for t in tracks],
+        })
+
+    def _handle_library_audio(self, folder: str, n: int):
+        """Sirve una pista con soporte de Range."""
+        item = self._library_item(folder)
+        if item is None:
+            self._send_json({"error": "not found"}, 404)
+            return
+        track = self.kernel["library"].track_path(item, n)
+        if track is None or not track.is_file():
+            self._send_json({"error": "track not found"}, 404)
+            return
+
+        mime = "audio/mpeg" if track.suffix.lower() == ".mp3" else "audio/mp4"
+        self._serve_media(track, mime)
+
+    def _handle_library_file(self, folder: str, kind: str):
+        """Entrega el epub/pdf de una obra, para el lector embebido.
+
+        Va por _serve_media, asi que responde a Range: epub.js se trae el
+        archivo entero, pero un pdf grande se puede ir leyendo por partes.
+        """
+        item = self._library_item(folder)
+        if item is None:
+            self._send_json({"error": "not found"}, 404)
+            return
+        target = self.kernel["library"].book_path(item, kind)
+        if target is None or not target.is_file():
+            self._send_json({"error": f"no hay {kind} para esta obra"}, 404)
+            return
+
+        mime = ("application/pdf" if kind == "pdf"
+                else "application/epub+zip")
+        self._serve_media(target, mime)
+
+    def _serve_media(self, path: Path, content_type: str):
+        """Envia un archivo, respondiendo a `Range` con 206.
+
+        `<audio>` pide rangos para buscar dentro de la pista. Sin 206 el
+        navegador tiene que descargar el archivo completo cada vez que mueves la
+        barra, y en varios navegadores la busqueda simplemente no funciona.
+        """
+        size = path.stat().st_size
+        start, end, partial = 0, size - 1, False
+
+        raw = self.headers.get("Range")
+        if raw:
+            match = re.match(r"bytes=(\d*)-(\d*)\s*$", raw.strip())
+            if match:
+                first, last = match.group(1), match.group(2)
+                if first:
+                    start = int(first)
+                    end = min(int(last), size - 1) if last else size - 1
+                elif last:
+                    start = max(0, size - int(last))  # los ultimos N bytes
+                partial = start < size and start <= end
+
+            if not partial:
+                # Un rango imposible se contesta con 416, no sirviendo el
+                # archivo entero como si nada hubiera pasado.
+                self._media_response = True
+                self.send_response(416)
+                self.send_header("Content-Range", f"bytes */{size}")
+                self.end_headers()
+                return
+
+        length = end - start + 1
+        self._media_response = True
+        self.send_response(206 if partial else 200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(length))
+        self.send_header("Accept-Ranges", "bytes")
+        self.send_header("Cache-Control", "private, max-age=3600")
+        if partial:
+            self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+        self.end_headers()
+
+        with path.open("rb") as fh:
+            fh.seek(start)
+            remaining = length
+            while remaining > 0:
+                chunk = fh.read(min(262144, remaining))
+                if not chunk:
+                    break
+                try:
+                    self.wfile.write(chunk)
+                except (BrokenPipeError, ConnectionResetError,
+                        ConnectionAbortedError):
+                    # Normal: el navegador corta la peticion en cada busqueda o
+                    # cambio de pista. No es un error que valga reportar.
+                    # En Windows el corte llega como ConnectionAbortedError
+                    # (WinError 10053), no como BrokenPipeError.
+                    return
+                remaining -= len(chunk)
+
     def _handle_library_cover(self, folder_name: str):
         """Sirve la portada extraida del epub, desde disco.
 
@@ -340,6 +486,7 @@ class DownloaderHandler(SimpleHTTPRequestHandler):
         # El archivo se llama .jpg siempre, pero la portada del epub puede ser
         # PNG: el tipo se declara por los bytes, no por la extension.
         mime = "image/png" if data[:8] == b"\x89PNG\r\n\x1a\n" else "image/jpeg"
+        self._media_response = True  # cacheable: la portada no cambia
         self.send_response(200)
         self.send_header("Content-Type", mime)
         self.send_header("Content-Length", str(len(data)))
@@ -818,6 +965,7 @@ class DownloaderHandler(SimpleHTTPRequestHandler):
                 "current_chapter": progress.current_chapter,
                 "total_chapters": progress.total_chapters,
                 "chapter_title": progress.chapter_title,
+                "resumed_chapters": progress.resumed_chapters,
             }
         )
 

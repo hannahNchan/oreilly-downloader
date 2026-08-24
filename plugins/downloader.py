@@ -24,6 +24,9 @@ class DownloadProgress:
     total_chapters: int = 0
     chapter_title: str = ""
     book_id: str = ""
+    # Capitulos que ya estaban en la cache de reanudacion y no se volvieron a
+    # pedir. 0 en una descarga normal.
+    resumed_chapters: int = 0
 
 
 @dataclass
@@ -164,6 +167,7 @@ class DownloaderPlugin(Plugin):
             current_chapter: int = 0,
             total_chapters: int = 0,
             chapter_title: str = "",
+            resumed_chapters: int = 0,
         ):
             if progress_callback:
                 progress_callback(
@@ -176,6 +180,7 @@ class DownloaderPlugin(Plugin):
                         total_chapters=total_chapters,
                         chapter_title=chapter_title,
                         book_id=book_id,
+                        resumed_chapters=resumed_chapters,
                     )
                 )
 
@@ -237,6 +242,26 @@ class DownloaderPlugin(Plugin):
         )
         oebps = output_plugin.get_oebps_dir(book_dir)
 
+        # Cache de reanudacion. El token de O'Reilly dura ~15 minutos y un libro
+        # grande son cientos de peticiones: si la sesion muere a mitad, sin esto
+        # el reintento empieza de cero. Se guarda el HTML CRUDO, que es lo unico
+        # que cuesta red; procesarlo y traducirlo se recalcula offline y gratis.
+        cache_dir = book_dir / ".cache" / "chapters"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+
+        def cache_path(name: str) -> Path:
+            # El nombre del capitulo puede traer subcarpetas; se aplanan para
+            # que la cache sea un solo directorio plano.
+            return cache_dir / (name.replace("/", "__") + ".html")
+
+        ya_en_cache = sum(
+            1 for ch in chapters
+            if cache_path(ch["filename"].replace(".html", ".xhtml")).is_file()
+        )
+        if ya_en_cache:
+            print(f"[RESUME] {ya_en_cache}/{len(chapters)} capitulos ya en cache, "
+                  "no se vuelven a pedir")
+
         # Phase 3: Download cover
         if not skip_images:
             report("downloading_cover", 12)
@@ -271,6 +296,7 @@ class DownloaderPlugin(Plugin):
                 current_chapter=i + 1,
                 total_chapters=total_chapters,
                 chapter_title=ch.get("title", ""),
+                resumed_chapters=ya_en_cache,
             )
 
             # Compute relative path prefix based on chapter depth in OEBPS
@@ -278,8 +304,21 @@ class DownloaderPlugin(Plugin):
             depth = filename.count("/")
             path_prefix = "../" * depth if depth > 0 else ""
 
-            # Fetch and process chapter content
-            raw_html = chapters_plugin.fetch_content(ch["content_url"])
+            # Fetch and process chapter content. Con el capitulo ya en cache
+            # se salta la red entera, incluido el REQUEST_DELAY de 0.5s por
+            # peticion, que es lo que hace largo un reintento.
+            cached = cache_path(filename)
+            if cached.is_file() and cached.stat().st_size:
+                raw_html = cached.read_text(encoding="utf-8")
+            else:
+                raw_html = chapters_plugin.fetch_content(ch["content_url"])
+                # Escritura a .part + rename: un corte a mitad de escritura no
+                # deja un capitulo truncado que luego se daria por completo.
+                # fetch_content ya rechaza los stubs de preview, asi que aqui
+                # solo llega HTML valido.
+                tmp = cached.parent / (cached.name + ".part")
+                tmp.write_text(raw_html, encoding="utf-8")
+                tmp.replace(cached)
             processed, images = html_processor.process(
                 raw_html, book_id, skip_images=skip_images, path_prefix=path_prefix
             )
@@ -542,6 +581,11 @@ class DownloaderPlugin(Plugin):
                 )
                 result.files["chunks"] = str(chunks_path)
             guard("chunks", _make_chunks)
+
+        # La descarga acabo: la cache de reanudacion ya no sirve de nada y no
+        # debe viajar a la biblioteca. Solo se borra en el camino de exito; si
+        # algo falla antes, sobrevive y el siguiente intento la aprovecha.
+        shutil.rmtree(book_dir / ".cache", ignore_errors=True)
 
         # Forma canonica en la cache local: la obra queda exactamente como va a
         # quedar en la biblioteca, asi que publicarla es solo copiar.

@@ -193,9 +193,14 @@ class LibraryPlugin(Plugin):
         # Pistas de audio: renumeradas por orden alfabetico del nombre original
         audio = sorted(p for p in obj.iterdir()
                        if p.is_file() and p.suffix.lower() in AUDIO_SUFFIXES)
+        from_names: list[tuple[str, str]] = []
         for n, src in enumerate(audio, start=1):
             dest = obj / "audiobook" / f"{n:03d}{src.suffix.lower()}"
             dest.parent.mkdir(parents=True, exist_ok=True)
+            # El nombre original lleva el titulo del capitulo ("01 - Chapter 1.
+            # Introduction..."); el canonico lo pierde. Se anota antes.
+            if not re.fullmatch(r"\d{3}", src.stem):
+                from_names.append((dest.name, src.stem))
             if src != dest:
                 src.replace(dest)
 
@@ -233,6 +238,37 @@ class LibraryPlugin(Plugin):
             "date": meta.get("date"),
             "isbn": meta.get("isbn") or meta.get("book_id"),
         }
+        # Titulos de las pistas, por orden de fiabilidad: el sidecar (viene de
+        # la API con los nombres reales), lo que dijeran los nombres de archivo,
+        # y por ultimo lo que ya hubiera en metadata.json — para no perderlo al
+        # re-finalizar un objeto que ya estaba canonico.
+        sidecar = self._read_sidecar(obj)
+        # Datos de completitud: viven en el sidecar de la descarga y tienen que
+        # llegar al metadata.json, que es lo que lee el visor.
+        for key in ("duration_seconds", "expected_tracks"):
+            if sidecar.get(key) is not None:
+                payload[key] = sidecar[key]
+            elif meta.get(key) is not None:
+                payload[key] = meta[key]
+
+        chapters = sidecar.get("chapters") or []
+        if chapters:
+            payload["tracks"] = [
+                {"n": n, "file": f"{n:03d}.m4a", "title": c.get("title"),
+                 "duration": c.get("duration")}
+                for n, c in enumerate(chapters, start=1) if c.get("title")
+            ]
+        elif from_names:
+            payload["tracks"] = [{"n": n, "file": f, "title": t}
+                                 for n, (f, t) in enumerate(from_names, start=1)]
+        else:
+            try:
+                previous = json.loads(
+                    (obj / "metadata.json").read_text(encoding="utf-8"))
+                payload["tracks"] = previous.get("tracks") or []
+            except (OSError, json.JSONDecodeError):
+                payload["tracks"] = []
+
         (obj / "metadata.json").write_text(
             json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8")
 
@@ -274,9 +310,12 @@ class LibraryPlugin(Plugin):
         shutil.rmtree(staging, ignore_errors=True)
         staging.mkdir(parents=True, exist_ok=True)
 
+        # La cache de reanudacion es un artefacto de la descarga, no parte de
+        # la obra: no viaja a la biblioteca.
         expected = {
             p.relative_to(local_dir).as_posix(): p.stat().st_size
             for p in local_dir.rglob("*") if p.is_file()
+            and ".cache" not in p.relative_to(local_dir).parts
         }
         total = sum(expected.values()) or 1
         copied_bytes = 0
@@ -401,8 +440,19 @@ class LibraryPlugin(Plugin):
                 except (OSError, json.JSONDecodeError):
                     continue
 
+                # Datos de completitud: en los objetos publicados antes de que
+                # existieran, solo estan en el sidecar de la descarga. Se toman
+                # de ahi para el indice; no hace falta reescribir metadata.json
+                # porque el indice se regenera entero cada vez.
+                if meta.get("duration_seconds") is None or meta.get("expected_tracks") is None:
+                    side = self._read_sidecar(obj)
+                    for key in ("duration_seconds", "expected_tracks"):
+                        if meta.get(key) is None and side.get(key) is not None:
+                            meta[key] = side[key]
+
                 files = [f for f in obj.rglob("*")
-                         if f.is_file() and f.name not in NOT_CONTENT]
+                         if f.is_file() and f.name not in NOT_CONTENT
+                         and ".cache" not in f.relative_to(obj).parts]
                 meta["formats"] = sorted({
                     FORMAT_BY_SUFFIX[f.suffix.lower()]
                     for f in files if f.suffix.lower() in FORMAT_BY_SUFFIX
@@ -523,12 +573,81 @@ class LibraryPlugin(Plugin):
                           if bid else None)
                 ),
                 "cover_local": bool(entry.get("has_cover")),
+                "duration_seconds": entry.get("duration_seconds"),
+                "expected_tracks": entry.get("expected_tracks"),
                 "related_ourn": entry.get("related_ourn"),
                 "work_id": wid,
                 "rel": rel,
                 "mtime": 0,
             })
         return items
+
+    def tracks_for(self, item: dict) -> list[dict]:
+        """Pistas ordenadas de un audiolibro, para el reproductor.
+
+        Sirve para los dos layouts: publicado (audiobook/001.m4a) y en cache
+        (nombres originales en la raiz). Los titulos salen de metadata.json si
+        estan; si no, quedan numerados, que es lo que pasa con los audiolibros
+        descargados antes de que se guardaran.
+        """
+        base = Path(item.get("path") or "")
+        if not base.is_dir():
+            return []
+
+        nested = base / "audiobook"
+        source = nested if nested.is_dir() else base
+        files = sorted(p for p in source.iterdir()
+                       if p.is_file() and p.suffix.lower() in AUDIO_SUFFIXES)
+
+        titles: dict[str, str] = {}
+        try:
+            meta = json.loads((base / "metadata.json").read_text(encoding="utf-8"))
+            for t in meta.get("tracks") or []:
+                if t.get("file") and t.get("title"):
+                    titles[t["file"]] = t["title"]
+        except (OSError, json.JSONDecodeError):
+            pass
+
+        out = []
+        for n, f in enumerate(files, start=1):
+            title = titles.get(f.name)
+            if not title and not re.fullmatch(r"\d{3}", f.stem):
+                title = f.stem  # nombre original: ya trae el titulo
+            out.append({
+                "n": n,
+                "title": title or f"Capítulo {n}",
+                "titled": bool(title),
+                "bytes": f.stat().st_size,
+            })
+        return out
+
+    def book_path(self, item: dict, kind: str = "epub") -> Path | None:
+        """Archivo del libro (epub/pdf) de una obra, o None.
+
+        Sirve para los dos layouts: publicado usa el nombre canonico
+        (book.epub) y la cache local conserva el nombre original.
+        """
+        base = Path(item.get("path") or "")
+        if not base.is_dir():
+            return None
+
+        suffix = "." + kind.lower().lstrip(".")
+        canonical = CANONICAL_NAME.get(suffix)
+        if canonical and (base / canonical).is_file():
+            return base / canonical
+        found = sorted(p for p in base.glob("*" + suffix) if p.is_file())
+        return found[0] if found else None
+
+    def track_path(self, item: dict, n: int) -> Path | None:
+        """Ruta en disco de la pista n (1-based), o None si no existe."""
+        base = Path(item.get("path") or "")
+        nested = base / "audiobook"
+        source = nested if nested.is_dir() else base
+        if not source.is_dir():
+            return None
+        files = sorted(p for p in source.iterdir()
+                       if p.is_file() and p.suffix.lower() in AUDIO_SUFFIXES)
+        return files[n - 1] if 1 <= n <= len(files) else None
 
     # --- escaneo ---------------------------------------------------------
 
@@ -541,7 +660,7 @@ class LibraryPlugin(Plugin):
             p for p in folder.rglob("*")
             if p.is_file() and not p.name.startswith(".")
             and p.name not in NOT_CONTENT
-            and not {"OEBPS", "META-INF"} & set(p.relative_to(folder).parts)
+            and not {"OEBPS", "META-INF", ".cache"} & set(p.relative_to(folder).parts)
         ]
         if not files and not (folder / SIDECAR_FILE).exists():
             return None
@@ -613,6 +732,8 @@ class LibraryPlugin(Plugin):
             "formats": formats,
             "files_count": len(files),
             "tracks": len(audio_files),
+            "duration_seconds": meta.get("duration_seconds"),
+            "expected_tracks": meta.get("expected_tracks"),
             "size_bytes": total_bytes,
             # Portada local si se pudo extraer; si no, la remota como respaldo
             "cover_url": (

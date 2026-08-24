@@ -93,7 +93,7 @@
             <div class="flex items-center gap-6 min-w-0">
                 <button id="home-link" class="home-link flex items-baseline gap-2 flex-shrink-0" aria-label="Ir al inicio">
                     <span class="text-[1.625rem] font-bold tracking-tight text-oreilly-red">O'REILLY</span>
-                    <span class="text-base font-medium text-zinc-300 hidden sm:inline">Ingest</span>
+                    <span class="text-base font-medium text-zinc-300 hidden sm:inline">DOWNLOADER</span>
                 </button>
                 <!-- Navegacion principal: botones normales, no segmented control -->
                 <nav class="main-nav" aria-label="Secciones">
@@ -355,6 +355,14 @@
         </div>
     </div>
 
+    <!-- Lector de EPUB. Los archivos van en vendor/ y no en un CDN a propósito:
+         toda esta app existe para tener la biblioteca en disco, así que un
+         lector que necesita internet para abrirse sería una contradicción.
+         Las licencias de cada uno están junto a sus archivos.
+         El orden importa: epub.js necesita JSZip ya cargado. -->
+    <script src="vendor/jszip.min.js"></script>
+    <script src="vendor/epub.min.js"></script>
+    <script src="reader.js"></script>
     <script src="app.js"></script>
 </body>
 </html>

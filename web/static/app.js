@@ -77,44 +77,36 @@ function renderTransferBar(state) {
     const btn = document.getElementById('transfer-all-btn');
     if (!bar) return;
 
-    // Configurada pero sin responder: se dice, en vez de dejar creer que no
-    // hay nada publicado.
+    // Un solo punto de salida: se decide el texto y la barra se muestra SOLO si
+    // hay texto. Antes cada rama la mostraba por su cuenta, así que bastaba con
+    // que una se saltara el mensaje para dejarla visible y vacía — ofreciendo
+    // "Transferir todas" sin nada que transferir.
+    let text = '';
+    let busy = false;
+
     if (state.unavailable) {
-        bar.classList.remove('hidden');
-        btn.disabled = true;
-        btn.textContent = 'Transferir todas';
-        msg.textContent = 'La carpeta de la biblioteca no responde ('
-            + (state.dir || '?') + '). Lo descargado sigue en la caché local.';
-        return;
-    }
-
-    if (state.running) {
-        bar.classList.remove('hidden');
-        btn.disabled = true;
-        btn.textContent = 'Transfiriendo...';
-        const n = state.index || 1;
-        msg.textContent = 'Transfiriendo ' + n + ' de ' + (state.total || 1)
+        // Configurada pero sin responder: se dice, en vez de dejar creer que no
+        // hay nada publicado. Y no se puede transferir a donde no responde.
+        text = 'La carpeta de la biblioteca no responde (' + (state.dir || '?')
+            + '). Lo descargado sigue en la caché local.';
+        busy = true;
+    } else if (state.running) {
+        text = 'Transfiriendo ' + (state.index || 1) + ' de ' + (state.total || 1)
             + ' - ' + (state.percentage || 0) + '%';
-        return;
-    }
-
-    btn.disabled = false;
-    btn.textContent = 'Transferir todas';
-
-    if (state.failedCount) {
-        bar.classList.remove('hidden');
-        msg.textContent = state.failedCount + ' obra(s) no se pudieron transferir: '
+        busy = true;
+    } else if (state.failedCount) {
+        text = state.failedCount + ' obra(s) no se pudieron transferir: '
             + state.firstError;
-        return;
-    }
-    if (state.localCount) {
-        bar.classList.remove('hidden');
-        msg.textContent = state.localCount === 1
+    } else if (state.localCount > 0) {
+        text = state.localCount === 1
             ? '1 obra en caché, sin pasar a la biblioteca'
             : state.localCount + ' obras en caché, sin pasar a la biblioteca';
-        return;
     }
-    bar.classList.add('hidden');
+
+    msg.textContent = text;
+    btn.disabled = busy;
+    btn.textContent = state.running ? 'Transfiriendo...' : 'Transferir todas';
+    bar.classList.toggle('hidden', !text);
 }
 
 async function pollTransfer() {
@@ -160,6 +152,451 @@ async function startTransfer(payload) {
         renderTransferBar({ failedCount: 1, firstError: 'No se pudo contactar al servidor' });
     }
 }
+
+
+/* ===== Reproductor de audiolibros ==========================================
+   No manejamos rutas: al abrir un audiolibro se ocultan los hijos de
+   #library-main y el sidebar, y se inserta la vista del reproductor. Volver es
+   quitarla y volver a mostrarlos — instantaneo y sin repedir la biblioteca. */
+
+const PLAYER_POS_KEY = 'oi-player-pos';   // { folder: { track, time } }
+const PLAYER_DUR_KEY = 'oi-player-dur';   // { folder: { n: segundos } }
+const PLAYER_SPEEDS = [0.75, 1, 1.25, 1.5, 1.75, 2];
+
+let playerView = null;    // el <section> insertado, o null si esta cerrado
+let playerKeys = null;    // handler de teclado, para poder quitarlo al cerrar
+
+function readStore(key) {
+    try { return JSON.parse(localStorage.getItem(key) || '{}'); }
+    catch (err) { return {}; }
+}
+
+function writeStore(key, value) {
+    try { localStorage.setItem(key, JSON.stringify(value)); }
+    catch (err) { /* cuota llena: perder la posicion no es grave */ }
+}
+
+function formatClock(seconds) {
+    if (!isFinite(seconds) || seconds < 0) return '--:--';
+    const s = Math.floor(seconds % 60);
+    const m = Math.floor(seconds / 60) % 60;
+    const h = Math.floor(seconds / 3600);
+    const ss = String(s).padStart(2, '0');
+    return h > 0 ? h + ':' + String(m).padStart(2, '0') + ':' + ss : m + ':' + ss;
+}
+
+async function openPlayer(item) {
+    const main = document.getElementById('library-main');
+    const sidebar = document.getElementById('library-sidebar');
+    if (!main || playerView) return;
+
+    // Ocultar en vez de borrar: el input de busqueda tambien vive aqui dentro,
+    // y reconstruir la rejilla al volver seria trabajo para nada.
+    //
+    // Se marca SOLO lo que estaba visible. Lo que ya estaba oculto por su
+    // propia lógica —la barra de transferencia cuando no hay nada que pasar, el
+    // estado vacío— no se toca: al salir, closePlayer destapa lo que marcó, y
+    // destapar algo que nunca debió verse es inventar estado.
+    Array.from(main.children).forEach(function (el) {
+        if (el.classList.contains('hidden')) return;
+        el.dataset.playerHidden = '1';
+        el.classList.add('hidden');
+    });
+    if (sidebar && !sidebar.classList.contains('hidden')) {
+        sidebar.dataset.playerHidden = '1';
+        sidebar.classList.add('hidden');
+    }
+
+    playerView = document.createElement('section');
+    playerView.id = 'player-view';
+    playerView.innerHTML = '<p class="text-sm text-zinc-500">Cargando pistas...</p>';
+    main.appendChild(playerView);
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+
+    let data;
+    try {
+        const res = await fetch(API + '/api/library/tracks/' + encodeURIComponent(item.folder));
+        data = await res.json();
+        if (data.error) throw new Error(data.error);
+        if (!data.tracks || !data.tracks.length) throw new Error('no hay pistas en disco');
+    } catch (err) {
+        playerView.innerHTML = '';
+        const msg = document.createElement('p');
+        msg.className = 'text-sm text-red-600 mb-3';
+        msg.textContent = 'No se pudo abrir el reproductor: ' + err.message;
+        playerView.append(msg, backButton());
+        return;
+    }
+
+    renderPlayer(item, data);
+}
+
+function backButton() {
+    const back = document.createElement('button');
+    back.type = 'button';
+    back.className = 'player-back';
+    back.innerHTML = '<span aria-hidden="true">\u2190</span> Volver a la biblioteca';
+    back.onclick = closePlayer;
+    return back;
+}
+
+function closePlayer() {
+    if (!playerView) return;
+    const audio = playerView.querySelector('audio');
+    if (audio) {
+        savePlayerPosition();
+        audio.pause();
+        audio.removeAttribute('src');
+        audio.load();          // corta la descarga en curso
+    }
+    if (playerKeys) {
+        document.removeEventListener('keydown', playerKeys);
+        playerKeys = null;
+    }
+    playerView.remove();
+    playerView = null;
+
+    const main = document.getElementById('library-main');
+    const sidebar = document.getElementById('library-sidebar');
+    // Se destapa exactamente lo que openPlayer tapó, ni un elemento más.
+    if (main) {
+        main.querySelectorAll('[data-player-hidden]').forEach(function (el) {
+            el.classList.remove('hidden');
+            delete el.dataset.playerHidden;
+        });
+    }
+    if (sidebar && sidebar.dataset.playerHidden) {
+        sidebar.classList.remove('hidden');
+        delete sidebar.dataset.playerHidden;
+    }
+}
+
+function savePlayerPosition() {
+    if (!playerView) return;
+    const audio = playerView.querySelector('audio');
+    const folder = playerView.dataset.folder;
+    if (!audio || !folder || !audio.src) return;
+    const all = readStore(PLAYER_POS_KEY);
+    all[folder] = { track: Number(playerView.dataset.track) || 1, time: audio.currentTime || 0 };
+    writeStore(PLAYER_POS_KEY, all);
+}
+
+function renderPlayer(item, data) {
+    const tracks = data.tracks;
+    playerView.innerHTML = '';
+    playerView.dataset.folder = item.folder;
+
+    const audio = document.createElement('audio');
+    audio.preload = 'metadata';
+
+    // ---------- cabecera: portada + datos + controles
+    const top = document.createElement('div');
+    top.className = 'player-top';
+
+    const cover = document.createElement('div');
+    cover.className = 'player-cover';
+    if (data.cover_url) {
+        const img = document.createElement('img');
+        img.src = data.cover_url;
+        img.alt = '';
+        img.addEventListener('error', function () { img.remove(); });
+        cover.appendChild(img);
+    }
+
+    const info = document.createElement('div');
+    info.className = 'player-info';
+
+    const h2 = document.createElement('h2');
+    h2.className = 'player-title';
+    h2.textContent = data.title || item.title;
+
+    const sub = document.createElement('p');
+    sub.className = 'player-sub';
+    sub.textContent = [(data.authors || []).join(', '), data.year,
+                       tracks.length + (tracks.length === 1 ? ' capítulo' : ' capítulos')]
+        .filter(Boolean).join('  ·  ');
+
+    const now = document.createElement('p');
+    now.className = 'player-now';
+
+    // ---------- barra de progreso
+    const bar = document.createElement('div');
+    bar.className = 'player-bar';
+    const tCur = document.createElement('span');
+    tCur.className = 'player-time';
+    tCur.textContent = '0:00';
+    const seek = document.createElement('input');
+    seek.type = 'range';
+    seek.className = 'player-seek';
+    seek.min = '0';
+    seek.max = '1000';
+    seek.value = '0';
+    seek.setAttribute('aria-label', 'Posición en el capítulo');
+    const tDur = document.createElement('span');
+    tDur.className = 'player-time';
+    tDur.textContent = '--:--';
+    bar.append(tCur, seek, tDur);
+
+    // ---------- controles
+    const controls = document.createElement('div');
+    controls.className = 'player-controls';
+
+    function ctl(label, aria, cls) {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.className = 'player-btn' + (cls ? ' ' + cls : '');
+        b.textContent = label;
+        b.setAttribute('aria-label', aria);
+        return b;
+    }
+
+    const bPrev = ctl('\u23ee', 'Capítulo anterior');
+    const bBack = ctl('\u21ba15', 'Atrás 15 segundos');
+    const bPlay = ctl('\u25b6', 'Reproducir', 'is-primary');
+    const bFwd = ctl('30\u21bb', 'Adelante 30 segundos');
+    const bNext = ctl('\u23ed', 'Capítulo siguiente');
+
+    const speed = document.createElement('select');
+    speed.className = 'player-select';
+    speed.setAttribute('aria-label', 'Velocidad');
+    PLAYER_SPEEDS.forEach(function (v) {
+        const o = document.createElement('option');
+        o.value = String(v);
+        o.textContent = v + '\u00d7';
+        if (v === 1) o.selected = true;
+        speed.appendChild(o);
+    });
+
+    const vol = document.createElement('input');
+    vol.type = 'range';
+    vol.className = 'player-vol';
+    vol.min = '0';
+    vol.max = '1';
+    vol.step = '0.05';
+    vol.value = '1';
+    vol.setAttribute('aria-label', 'Volumen');
+
+    controls.append(bPrev, bBack, bPlay, bFwd, bNext, speed, vol);
+    info.append(h2, sub, now, bar, controls);
+    top.append(cover, info);
+
+    // ---------- índice de capítulos
+    const list = document.createElement('ol');
+    list.className = 'player-tracks';
+    const rows = tracks.map(function (t) {
+        const li = document.createElement('li');
+        li.className = 'player-track';
+        li.dataset.n = String(t.n);
+
+        const num = document.createElement('span');
+        num.className = 'player-track-n';
+        num.textContent = String(t.n).padStart(2, '0');
+
+        const label = document.createElement('span');
+        label.className = 'player-track-title';
+        label.textContent = t.title;
+
+        const dur = document.createElement('span');
+        dur.className = 'player-track-dur';
+        dur.textContent = '';
+
+        li.append(num, label, dur);
+        li.onclick = function () { playTrack(t.n, true); };
+        list.appendChild(li);
+        return { li: li, dur: dur, meta: t };
+    });
+
+    const titled = tracks.some(function (t) { return t.titled; });
+    playerView.append(backButton(), top, list, audio);
+    if (!titled) {
+        const nota = document.createElement('p');
+        nota.className = 'player-note';
+        nota.textContent = 'Este audiolibro se descargó antes de que se guardaran '
+            + 'los nombres de los capítulos, así que el índice va numerado.';
+        list.insertAdjacentElement('beforebegin', nota);
+    }
+
+    // ---------- aviso de descarga incompleta
+    function warnIncomplete(text) {
+        let warn = playerView.querySelector('.player-warn');
+        if (!warn) {
+            warn = document.createElement('p');
+            warn.className = 'player-warn';
+            list.insertAdjacentElement('beforebegin', warn);
+        }
+        warn.textContent = text;
+    }
+
+    // Si sabemos cuántos capítulos debería haber, tener menos en disco solo
+    // puede significar que la descarga se cortó. Publicar eso en silencio es
+    // como servir un libro truncado sin decirlo.
+    const expected = Number(data.expected_tracks) || 0;
+    if (expected && expected > tracks.length) {
+        warnIncomplete('Descarga incompleta: tienes ' + tracks.length + ' de '
+            + expected + ' capítulos. Descárgalo otra vez para completarlo.');
+    }
+
+    // ---------- lógica
+    const durations = readStore(PLAYER_DUR_KEY)[item.folder] || {};
+
+    function paintDurations() {
+        rows.forEach(function (r) {
+            const d = durations[r.meta.n];
+            r.dur.textContent = d ? formatClock(d) : '';
+        });
+    }
+    paintDurations();
+
+    function setActive(n) {
+        rows.forEach(function (r) {
+            r.li.classList.toggle('is-playing', Number(r.li.dataset.n) === n);
+        });
+        const t = tracks[n - 1];
+        now.textContent = t ? String(n).padStart(2, '0') + '  ·  ' + t.title : '';
+        if ('mediaSession' in navigator && t) {
+            navigator.mediaSession.metadata = new MediaMetadata({
+                title: t.title,
+                artist: (data.authors || []).join(', '),
+                album: data.title || '',
+                artwork: data.cover_url ? [{ src: data.cover_url }] : [],
+            });
+        }
+    }
+
+    function playTrack(n, autoplay, startAt) {
+        if (n < 1 || n > tracks.length) return;
+        savePlayerPosition();
+        playerView.dataset.track = String(n);
+        audio.src = API + tracks[n - 1].url;
+        if (startAt) {
+            audio.addEventListener('loadedmetadata', function once() {
+                audio.removeEventListener('loadedmetadata', once);
+                audio.currentTime = startAt;
+            });
+        }
+        setActive(n);
+        if (autoplay) audio.play().catch(function () { /* el navegador puede exigir gesto */ });
+    }
+    bPlay.onclick = function () { audio.paused ? audio.play() : audio.pause(); };
+    bPrev.onclick = function () { playTrack(Number(playerView.dataset.track) - 1, true); };
+    bNext.onclick = function () { playTrack(Number(playerView.dataset.track) + 1, true); };
+    bBack.onclick = function () { audio.currentTime = Math.max(0, audio.currentTime - 15); };
+    bFwd.onclick = function () { audio.currentTime = audio.currentTime + 30; };
+    speed.onchange = function () { audio.playbackRate = Number(speed.value); };
+    vol.oninput = function () { audio.volume = Number(vol.value); };
+
+    audio.addEventListener('play', function () {
+        bPlay.textContent = '\u23f8';
+        bPlay.setAttribute('aria-label', 'Pausa');
+    });
+    audio.addEventListener('pause', function () {
+        bPlay.textContent = '\u25b6';
+        bPlay.setAttribute('aria-label', 'Reproducir');
+        savePlayerPosition();
+    });
+
+    audio.addEventListener('loadedmetadata', function () {
+        const n = Number(playerView.dataset.track);
+        if (isFinite(audio.duration)) {
+            durations[n] = audio.duration;
+            const all = readStore(PLAYER_DUR_KEY);
+            all[item.folder] = durations;
+            writeStore(PLAYER_DUR_KEY, all);
+            paintDurations();
+        }
+        tDur.textContent = formatClock(audio.duration);
+    });
+
+    let lastSaved = 0;
+    audio.addEventListener('timeupdate', function () {
+        if (!audio.duration) return;
+        seek.value = String(Math.round((audio.currentTime / audio.duration) * 1000));
+        tCur.textContent = formatClock(audio.currentTime);
+        // Guardar en cada tick seria escribir en localStorage 4 veces por
+        // segundo; cada 5s es suficiente para no perder el sitio.
+        if (audio.currentTime - lastSaved > 5 || audio.currentTime < lastSaved) {
+            lastSaved = audio.currentTime;
+            savePlayerPosition();
+        }
+    });
+
+    seek.oninput = function () {
+        if (audio.duration) audio.currentTime = (Number(seek.value) / 1000) * audio.duration;
+    };
+
+    // Al acabar un capítulo sigue el siguiente: es un audiolibro, no una lista
+    // de canciones sueltas.
+    audio.addEventListener('ended', function () {
+        const next = Number(playerView.dataset.track) + 1;
+        if (next <= tracks.length) playTrack(next, true);
+        else savePlayerPosition();
+    });
+
+    playerKeys = function (e) {
+        if (!playerView) return;
+        const tag = (e.target.tagName || '').toLowerCase();
+        if (tag === 'input' || tag === 'select' || tag === 'textarea') return;
+        if (e.key === ' ') { e.preventDefault(); bPlay.onclick(); }
+        else if (e.key === 'ArrowLeft') { e.preventDefault(); bBack.onclick(); }
+        else if (e.key === 'ArrowRight') { e.preventDefault(); bFwd.onclick(); }
+        else if (e.key === 'n') bNext.onclick();
+        else if (e.key === 'p') bPrev.onclick();
+        else if (e.key === 'Escape') closePlayer();
+    };
+    document.addEventListener('keydown', playerKeys);
+
+    // Retomar donde se quedó, sin arrancar solo: reproducir sin que lo pidas es
+    // de mala educación.
+    const saved = readStore(PLAYER_POS_KEY)[item.folder];
+    if (saved && saved.track >= 1 && saved.track <= tracks.length) {
+        playTrack(saved.track, false, saved.time);
+        if (saved.time > 5) {
+            now.textContent += '  ·  retomando en ' + formatClock(saved.time);
+        }
+    } else {
+        playTrack(1, false);
+    }
+
+    // Duraciones del resto del índice, una por una y en segundo plano. Usa las
+    // peticiones por rango del servidor, asi que baja solo la cabecera.
+    (async function fillDurations() {
+        for (const t of tracks) {
+            if (!playerView || durations[t.n]) continue;
+            const probe = new Audio();
+            probe.preload = 'metadata';
+            probe.src = API + t.url;
+            const ok = await new Promise(function (resolve) {
+                probe.addEventListener('loadedmetadata', function () { resolve(true); });
+                probe.addEventListener('error', function () { resolve(false); });
+                setTimeout(function () { resolve(false); }, 8000);
+            });
+            if (ok && isFinite(probe.duration)) {
+                durations[t.n] = probe.duration;
+                paintDurations();
+            }
+            probe.src = '';
+        }
+        const all = readStore(PLAYER_DUR_KEY);
+        all[item.folder] = durations;
+        writeStore(PLAYER_DUR_KEY, all);
+
+        // Los audiolibros bajados antes de que se guardara expected_tracks no
+        // tienen ese dato, pero sí la duración total que dice O'Reilly: comparar
+        // contra lo que suman las pistas delata igual una descarga cortada.
+        if (!playerView || expected) return;
+        const esperado = Number(data.duration_seconds) || 0;
+        const suma = Object.keys(durations).reduce(function (acc, k) {
+            return acc + (durations[k] || 0);
+        }, 0);
+        if (esperado && suma && suma < esperado * 0.9) {
+            warnIncomplete('Descarga incompleta: tienes ' + formatClock(suma)
+                + ' de ' + formatClock(esperado) + ' ('
+                + Math.round(suma / esperado * 100) + '%). '
+                + 'Descárgalo otra vez para completarlo.');
+        }
+    })();
+}
+
 
 async function loadLibrary(options) {
     const refresh = !!(options && options.refresh);
@@ -308,9 +745,15 @@ function libraryTile(item) {
         coverBox.appendChild(star);
     }
 
-    // Un clic abre la carpeta en el explorador: es un visor de biblioteca,
-    // no un lector, asi que lo util es llevarte al archivo.
-    div.onclick = function () { revealFile(item.path); };
+    // Un audiolibro abre el reproductor; un libro con epub, el lector. Si no
+    // hay epub (solo pdf, markdown, json...) no hay nada que leer aqui dentro,
+    // asi que se cae al atajo de siempre: abrir la carpeta.
+    const hasEpub = (item.formats || []).indexOf('epub') !== -1;
+    div.onclick = isAudio
+        ? function () { openPlayer(item); }
+        : (hasEpub
+            ? function () { openReader(item); }
+            : function () { revealFile(item.path); });
     div.title = item.title + '\n' + item.path;
     return div;
 }
@@ -415,6 +858,12 @@ function goToSection(ct) {
 }
 
 function setContentMode(mode) {
+    // Cualquier navegación cierra el reproductor. Sin esto quedaba abierto por
+    // detrás con los hijos de #library-main ocultos —incluido el input de
+    // búsqueda, que vive ahí dentro cuando estás en la biblioteca— y tanto el
+    // visor como el inicio aparecían en blanco.
+    closePlayer();
+
     const isLibrary = mode === 'library';
     document.getElementById('library-view').classList.toggle('is-open', isLibrary);
     moveSearchInput(isLibrary);
@@ -571,6 +1020,19 @@ function buildCardMenu(item) {
     fav.setAttribute('role', 'menuitem');
     fav.textContent = isFav ? 'Quitar de favoritos' : 'Marcar como favorito';
 
+    // El clic en la tarjeta ahora abre el lector o el reproductor, asi que el
+    // atajo a la carpeta se conserva aqui: sigue siendo util para llevarte el
+    // archivo a otro lado.
+    const open = document.createElement('button');
+    open.type = 'button';
+    open.setAttribute('role', 'menuitem');
+    open.textContent = 'Abrir carpeta';
+    open.onclick = (e) => {
+        e.stopPropagation();
+        closeAllCardMenus();
+        revealFile(item.path);
+    };
+
     // Solo para lo que sigue en cache: pasar algo que ya esta publicado no
     // significaria nada, asi que la opcion no aparece.
     const move = item.location === 'local' ? document.createElement('button') : null;
@@ -615,15 +1077,15 @@ function buildCardMenu(item) {
 
     // Navegacion con teclado dentro del menu
     list.addEventListener('keydown', (e) => {
-        const items = [fav, move, del].filter(Boolean);
+        const items = [open, fav, move, del].filter(Boolean);
         const at = items.indexOf(document.activeElement);
         if (e.key === 'ArrowDown') { e.preventDefault(); items[(at + 1) % items.length].focus(); }
         else if (e.key === 'ArrowUp') { e.preventDefault(); items[(at - 1 + items.length) % items.length].focus(); }
         else if (e.key === 'Escape') { e.preventDefault(); closeAllCardMenus(); btn.focus(); }
     });
 
-    if (move) list.append(fav, move, del);
-    else list.append(fav, del);
+    if (move) list.append(open, fav, move, del);
+    else list.append(open, fav, del);
     wrap.append(btn, list);
     return wrap;
 }
@@ -1974,8 +2436,38 @@ async function pollProgress(cardElement) {
             setDownloadLock(false);  // unlock the rest of the UI
         }
 
+        // Terminada con éxito el botón NO vuelve a su estado inicial. Dejarlo
+        // activo invitaba a pulsarlo otra vez y repetir la misma descarga.
+        // El color va por clase CSS y no por utilidades de Tailwind: el
+        // `disabled:` depende del orden en que se emita la variante y aquí no
+        // conviene apostar a eso.
+        function markDownloaded() {
+            downloadBtn.classList.remove('hidden');
+            downloadBtn.disabled = true;
+            downloadBtn.textContent = 'Descargado';
+            downloadBtn.classList.add('is-done');
+            cancelBtn.classList.add('hidden');
+            cancelBtn.disabled = false;
+            cancelBtn.textContent = 'Cancel';
+            setDownloadLock(false);
+
+            // Si cambias cualquier opción (formato, idioma, capítulos) se
+            // rehabilita: ya no sería la misma descarga, y sin esto la única
+            // salida para bajarlo traducido era repetir la búsqueda.
+            const panel = cardElement.querySelector('.book-expanded');
+            if (panel) {
+                const reenable = function () {
+                    downloadBtn.disabled = false;
+                    downloadBtn.textContent = 'Descargar de nuevo';
+                    downloadBtn.classList.remove('is-done');
+                    panel.removeEventListener('change', reenable);
+                };
+                panel.addEventListener('change', reenable);
+            }
+        }
+
         if (data.status === 'completed') {
-            restoreButtons();
+            markDownloaded();
             progressSection.classList.add('hidden');
             resultSection.classList.remove('hidden');
 
@@ -2195,6 +2687,14 @@ document.addEventListener('DOMContentLoaded', () => {
         tab.addEventListener('click', () => {
             if (downloadInProgress) return;
             let ct = tab.dataset.ct;
+            // Desde el reproductor, "Mi biblioteca" significa volver a la
+            // rejilla, no alternar a Libros. Sin esto te sacaba de la
+            // biblioteca y aterrizabas en una búsqueda vacía, que se veía
+            // igual que si la biblioteca estuviera vacía.
+            if (ct === 'library' && playerView) {
+                closePlayer();
+                return;
+            }
             // "Mi biblioteca" alterna: pulsarlo estando activo vuelve a Libros
             if (ct === searchState.contentType) {
                 if (ct !== 'library') return;
