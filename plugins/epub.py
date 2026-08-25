@@ -105,21 +105,36 @@ class EpubPlugin(Plugin):
                 f'    <item id="css{i:02d}" href="Styles/Style{i:02d}.css" media-type="text/css"/>'
             )
 
-        cover_image_id = None
-        if cover_image:
-            cover_image_id = f"img_{Path(cover_image).stem}"
+        # El manifiesto tiene que declarar TODOS los recursos del paquete.
+        # Antes solo recorria Images/, asi que las imagenes que un CSS
+        # referencia con url(...) —que se descargan junto a la hoja de estilos,
+        # dentro de Styles/— quedaban sin declarar. Un lector no puede resolver
+        # lo que no esta en el manifiesto: epub.js acaba pidiendolas al servidor
+        # y salen rotas.
+        declared = {"toc.ncx", "nav.xhtml"}
+        declared.update(f"Styles/Style{i:02d}.css" for i in range(len(css_files)))
+        declared.update(
+            ch["filename"].replace(".html", ".xhtml") for ch in chapters
+        )
 
-        images_dir = oebps / "Images"
-        if images_dir.exists():
-            for img_file in images_dir.iterdir():
-                img_id = f"img_{img_file.stem}"
-                media_type = self._get_image_media_type(img_file.suffix)
-                properties = ""
-                if cover_image_id and img_id == cover_image_id:
-                    properties = ' properties="cover-image"'
-                manifest_items.append(
-                    f'    <item id="{img_id}" href="Images/{img_file.name}" media-type="{media_type}"{properties}/>'
-                )
+        for asset in sorted(a for a in oebps.rglob("*") if a.is_file()):
+            rel = asset.relative_to(oebps).as_posix()
+            if rel in declared:
+                continue
+            if asset.suffix.lower() in (".xhtml", ".html", ".css", ".opf", ".ncx"):
+                continue
+
+            # Id unico a partir de la ruta relativa y no del nombre: dos
+            # archivos homonimos en carpetas distintas (Images/logo.png y
+            # Styles/logo.png) generarian el mismo id y el OPF seria invalido.
+            item_id = "res_" + re.sub(r"[^A-Za-z0-9]+", "_", rel).strip("_")
+            properties = ""
+            if cover_image and rel == f"Images/{cover_image}":
+                properties = ' properties="cover-image"'
+            manifest_items.append(
+                f'    <item id="{item_id}" href="{rel}" '
+                f'media-type="{self._get_image_media_type(asset.suffix)}"{properties}/>'
+            )
 
         spine_items = []
         for i, ch in enumerate(chapters):
@@ -270,6 +285,12 @@ class EpubPlugin(Plugin):
             ".png": "image/png",
             ".gif": "image/gif",
             ".svg": "image/svg+xml",
+            ".webp": "image/webp",
+            ".woff": "font/woff",
+            ".woff2": "font/woff2",
+            ".ttf": "font/ttf",
+            ".otf": "font/otf",
+            ".eot": "application/vnd.ms-fontobject",
         }
         return types.get(suffix.lower(), "application/octet-stream")
 

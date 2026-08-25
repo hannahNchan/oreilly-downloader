@@ -18,5 +18,7 @@ from .library import LibraryPlugin
 
 # Orchestration and system plugins
 from .output import OutputPlugin
+from .queue import QueuePlugin
+from .watchlist import WatchlistPlugin
 from .system import SystemPlugin
 from .downloader import DownloaderPlugin, DownloadProgress, DownloadResult

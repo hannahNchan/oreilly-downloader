@@ -2,6 +2,7 @@ import re
 import time
 
 from .base import Plugin
+from .errors import SessionExpired
 from core.types import ChapterInfo
 import config
 
@@ -82,6 +83,17 @@ class ChaptersPlugin(Plugin):
     # paragraph of each chapter, so detect it and retry/fail loudly.
     _PREVIEW_MAX_BYTES = 6000
     _PREVIEW_RETRIES = 3
+    # Cuanto vale la comprobacion de sesion antes de repetirla. Un libro puede
+    # tener varios capitulos cortos seguidos (apendices, indice) y no hace
+    # falta un control por cada uno.
+    _ALIVE_TTL = 60
+
+    def __init__(self):
+        # Un capitulo que llego COMPLETO sirve de patron de control: si vuelve
+        # a llegar completo, la sesion funciona. Se guarda entre descargas a
+        # proposito — cualquier capitulo completo prueba lo mismo.
+        self._reference_url: str | None = None
+        self._alive_until: float = 0.0
 
     def fetch_content(self, content_url: str) -> str:
         """Fetch chapter HTML, retrying if the server returns a preview stub."""
@@ -89,7 +101,21 @@ class ChaptersPlugin(Plugin):
         for attempt in range(self._PREVIEW_RETRIES):
             last = self.http.get_text(content_url)
             if not self._looks_truncated(last):
+                if len(last) > self._PREVIEW_MAX_BYTES:
+                    self._reference_url = content_url
                 return last
+
+            # "Corto y acabado en puntos suspensivos" es una SOSPECHA, no un
+            # veredicto: un capitulo de conclusion o un apendice pueden ser asi
+            # de verdad. Antes se daba por caducada la sesion sin comprobarlo, y
+            # entonces no habia cookies que arreglaran nada — pegabas unas
+            # nuevas, reintentaba, y el mismo capitulo volvia a fallar igual.
+            if self._session_alive():
+                print(f"[CHAPTERS] {content_url} es corto y acaba en puntos "
+                      f"suspensivos, pero la sesion responde completo: "
+                      f"se acepta como contenido real ({len(last)} bytes)")
+                return last
+
             if attempt < self._PREVIEW_RETRIES - 1:
                 # The session may have gone stale mid-download; reload cookies
                 # from disk (the user may have refreshed them) and back off.
@@ -98,12 +124,52 @@ class ChaptersPlugin(Plugin):
                     reload_cookies()
                 time.sleep(config.RETRY_BACKOFF * (attempt + 1))
 
-        raise RuntimeError(
-            f"O'Reilly returned only a preview stub for {content_url} "
-            f"({len(last)} bytes). Your session most likely expired mid-download "
-            "(long translations can take hours). Copy fresh cookies from your "
-            "browser, POST them to /api/cookies, and download again."
+        # SessionExpired y no RuntimeError: la cola reacciona distinto a esto
+        # que a cualquier otro fallo — en vez de perder el trabajo, lo pausa y
+        # espera cookies nuevas para seguir donde iba.
+        raise SessionExpired(
+            f"O'Reilly devolvio solo un avance de {content_url} "
+            f"({len(last)} bytes) y {self._jwt_note()} "
+            "Pega cookies nuevas para continuar."
         )
+
+    def _session_alive(self) -> bool:
+        """True si un capitulo que ya llego completo sigue llegando completo.
+
+        Es la unica prueba fiable de que la sesion sirve: mirar la fecha `exp`
+        del orm-jwt no vale, porque O'Reilly puede dejar de honrar un token que
+        aun no ha caducado (por ejemplo si el navegador lo rota en otra pestaña).
+        Sin patron de control todavia no se puede afirmar nada, y ahi se
+        mantiene la conducta prudente: tratarlo como sesion caida.
+        """
+        if not self._reference_url:
+            return False
+        if time.time() < self._alive_until:
+            return True
+        try:
+            control = self.http.get_text(self._reference_url)
+        except Exception:  # noqa: BLE001 - si el control falla, no se afirma nada
+            return False
+        if len(control) > self._PREVIEW_MAX_BYTES:
+            self._alive_until = time.time() + self._ALIVE_TTL
+            return True
+        return False
+
+    def _jwt_note(self) -> str:
+        """Que decia el token en el momento del fallo.
+
+        Sin esto el mensaje decia "la sesion caduco" incluso con un token
+        valido, justo cuando la cabecera mostraba minutos por delante: dos
+        afirmaciones contradictorias, y ninguna explicaba nada.
+        """
+        estado = getattr(self.http, "get_jwt_status", lambda: None)()
+        if estado is None:
+            return "no hay token orm-jwt guardado."
+        if not estado.get("valid"):
+            return "el token orm-jwt ya habia caducado."
+        return ("el token orm-jwt aun era valido: lo que dejo de servir es la "
+                "sesion, no el token (suele pasar si el navegador la renovo "
+                "en otra pestaña).")
 
     def _looks_truncated(self, html: str) -> bool:
         """True if the HTML looks like O'Reilly's cut-off abstract preview."""

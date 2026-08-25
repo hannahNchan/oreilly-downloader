@@ -97,7 +97,21 @@
                 </button>
                 <!-- Navegacion principal: botones normales, no segmented control -->
                 <nav class="main-nav" aria-label="Secciones">
-                    <button id="ct-library" data-ct="library" class="ct-tab nav-btn">Mi biblioteca</button>
+                    <div class="nav-menu">
+                        <button id="books-menu-btn" class="nav-btn" aria-haspopup="true" aria-expanded="false">
+                            Mis libros <span class="nav-caret" aria-hidden="true">&#9662;</span>
+                        </button>
+                        <div class="nav-menu-list hidden" id="books-menu" role="menu">
+                            <button id="ct-library" data-ct="library" class="ct-tab nav-menu-item" role="menuitem">
+                                <span>Biblioteca</span>
+                                <span class="nav-menu-count" id="nav-library-count"></span>
+                            </button>
+                            <button id="ct-watchlist" data-ct="watchlist" class="ct-tab nav-menu-item" role="menuitem">
+                                <span>Para despu&eacute;s</span>
+                                <span class="nav-menu-count" id="nav-watchlist-count"></span>
+                            </button>
+                        </div>
+                    </div>
                 </nav>
             </div>
             <div class="flex items-center gap-4">
@@ -211,6 +225,24 @@
             </div>
         </div>
 
+        <!-- Para despues: titulos guardados que aun no se han descargado. Es lo
+             contrario de los "favoritos" con estrella, que marcan obras que YA
+             estan en disco. -->
+        <div id="watchlist-view">
+            <div class="flex items-baseline justify-between gap-3 flex-wrap mb-4">
+                <h2 class="text-lg font-semibold text-zinc-900">Para despu&eacute;s</h2>
+                <div class="flex items-center gap-3">
+                    <span id="watchlist-count" class="text-sm text-zinc-500"></span>
+                    <!-- Solo aparece si hay algo que limpiar: un boton que no
+                         hara nada es ruido. Lo pinta loadWatchlist(). -->
+                    <button type="button" id="watchlist-clear"
+                            class="wl-btn-action hidden">Limpiar descargados</button>
+                </div>
+            </div>
+            <div id="watchlist-list"></div>
+            <p id="watchlist-empty" class="hidden text-center py-16 text-zinc-500"></p>
+        </div>
+
         <!-- Filtros de la CONSULTA, justo debajo del input: van a la API, asi que
              deben poder elegirse ANTES de buscar. Visibles en todos los estados
              para que su posicion no cambie al aparecer los resultados. -->
@@ -290,8 +322,8 @@
                         <li>Open browser console <kbd class="px-1.5 py-0.5 bg-zinc-100 rounded text-xs font-mono">F12</kbd> → Console</li>
                         <li>Paste this command and press Enter:</li>
                     </ol>
-                    <pre class="bg-zinc-900 text-zinc-100 text-xs p-4 rounded-xl overflow-x-auto font-mono leading-relaxed"><code>JSON.stringify(document.cookie.split(';').map(c=>c.split('=')).reduce((r,[k,v])=>({...r,[k.trim()]:v?.trim()}),{}))</code></pre>
-                    <p class="text-sm">Copy the output and paste below:</p>
+                    <pre class="bg-zinc-900 text-zinc-100 text-xs p-4 rounded-xl overflow-x-auto font-mono leading-relaxed"><code>copy(document.cookie)</code></pre>
+                    <p class="text-sm">That copies them to your clipboard &mdash; paste below:</p>
                 </div>
 
                 <textarea
@@ -363,6 +395,8 @@
     <script src="vendor/jszip.min.js"></script>
     <script src="vendor/epub.min.js"></script>
     <script src="reader.js"></script>
+    <script src="watchlist.js"></script>
+    <script src="batch.js"></script>
     <script src="app.js"></script>
 </body>
 </html>

@@ -10,7 +10,6 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 from core import Kernel, create_default_kernel
 from plugins import ChunkConfig
-from plugins.downloader import DownloadProgress
 import config
 
 
@@ -18,9 +17,6 @@ class DownloaderHandler(SimpleHTTPRequestHandler):
     """HTTP request handler for the downloader web interface."""
 
     kernel: Kernel = None
-    download_progress: dict = {}
-    _progress_lock = threading.Lock()
-    _cancel_requested: bool = False
     # La cola de transferencia lleva su propio estado: puede correr con una
     # descarga en marcha y mezclarlos dejaria la UI mostrando cualquier cosa.
     transfer_progress: dict = {}
@@ -35,18 +31,6 @@ class DownloaderHandler(SimpleHTTPRequestHandler):
     def _update_transfer(cls, **kwargs):
         with cls._transfer_lock:
             cls.transfer_progress.update(kwargs)
-
-    @classmethod
-    def _set_progress(cls, data: dict):
-        """Thread-safe progress replacement."""
-        with cls._progress_lock:
-            cls.download_progress = data
-
-    @classmethod
-    def _update_progress(cls, **kwargs):
-        """Thread-safe progress update."""
-        with cls._progress_lock:
-            cls.download_progress.update(kwargs)
 
     def __init__(self, *args, **kwargs):
         self.static_dir = Path(__file__).parent / "static"
@@ -81,6 +65,10 @@ class DownloaderHandler(SimpleHTTPRequestHandler):
             self._handle_book_info(match.group(1))
         elif path == "/api/progress":
             self._handle_progress()
+        elif path == "/api/queue":
+            self._send_json(self.kernel["queue"].snapshot())
+        elif path == "/api/watchlist":
+            self._send_json({"items": self.kernel["watchlist"].annotated()})
         elif path == "/api/settings":
             self._handle_get_settings()
         elif path == "/api/formats":
@@ -147,6 +135,21 @@ class DownloaderHandler(SimpleHTTPRequestHandler):
             self._handle_set_prefs(data)
         elif self.path == "/api/library/transfer":
             self._handle_transfer(data)
+        elif self.path == "/api/library/chapter-names":
+            self._handle_chapter_names(data)
+        elif match := re.match(r"/api/queue/([^/]+)/cancel$", self.path):
+            ok = self.kernel["queue"].cancel(match.group(1))
+            self._send_json({"success": ok})
+        elif self.path == "/api/queue/clear":
+            self._send_json({"removed": self.kernel["queue"].clear_finished()})
+        elif self.path == "/api/watchlist":
+            self._handle_watchlist_add(data)
+        elif self.path == "/api/watchlist/clear-downloaded":
+            self._send_json(
+                {"removed": self.kernel["watchlist"].clear_downloaded()})
+        elif match := re.match(r"/api/watchlist/([^/]+)/remove$", self.path):
+            removed = self.kernel["watchlist"].remove(unquote(match.group(1)))
+            self._send_json({"success": removed})
         else:
             self._send_json({"error": "Not found"}, 404)
 
@@ -206,13 +209,33 @@ class DownloaderHandler(SimpleHTTPRequestHandler):
         self._send_json(payload)
 
     def _mark_library(self, results: list):
-        """Flag results already in the output dir, para el cintillo de la UI."""
-        library = self.kernel["output"].list_downloaded()
+        """Marca cada resultado con lo que ya sabemos de el, para los cintillos.
+
+        Dos cosas distintas: si ya esta descargado, y si esta guardado para
+        despues. Un titulo puede estar en los dos estados a la vez.
+        """
+        # La verdad es lo que se ve en "Mi biblioteca", asi que se pregunta a
+        # la misma fuente: library.scan(), que fusiona lo publicado con lo que
+        # sigue en la cache local pero ya esta completo.
+        #
+        # Antes esto salia de output.list_downloaded(), que solo busca el
+        # marcador .book_id dentro de output/. Ese marcador lo escribe
+        # create_book_dir() ANTES de bajar el primer capitulo, asi que una
+        # descarga cancelada o caida dejaba el cintillo "EN LA BIBLIOTECA"
+        # puesto para siempre sobre un libro que no existe en ningun lado.
+        library = {}
+        for entry in self.kernel["library"].scan():
+            book_id = str(entry.get("book_id") or "")
+            if book_id:
+                library[book_id] = entry.get("folder") or ""
+
+        saved = self.kernel["watchlist"].ids()
         for item in results:
-            folder = library.get(str(item.get("id")))
-            item["in_library"] = folder is not None
-            if folder:
-                item["library_folder"] = folder
+            book_id = str(item.get("id"))
+            item["in_library"] = book_id in library
+            item["in_watchlist"] = book_id in saved
+            if item["in_library"]:
+                item["library_folder"] = library[book_id]
 
     def _handle_audiobook_info(self, book_id: str):
         try:
@@ -265,8 +288,40 @@ class DownloaderHandler(SimpleHTTPRequestHandler):
             self._send_json({"error": str(e)}, 400)
 
     def _handle_progress(self):
-        with self._progress_lock:
-            self._send_json(dict(self.download_progress))
+        """Alias del trabajo en curso, en la forma que espera la UI de siempre.
+
+        Se mantiene mientras el frontend migra a /api/queue: asi meter la cola
+        no rompe la pantalla de descarga de golpe.
+        """
+        job = self.kernel["queue"].running_job()
+        if not job:
+            self._send_json({})
+            return
+
+        payload = {
+            "status": job["phase"] or job["status"],
+            "book_id": job["book_id"],
+            "percentage": job["percentage"],
+            "message": job["message"],
+            "current_chapter": job["current_chapter"],
+            "total_chapters": job["total_chapters"],
+            "chapter_title": "",
+            "eta_seconds": None,
+            "resumed_chapters": 0,
+        }
+        if job["status"] == "completed":
+            payload.update({"status": "completed", "percentage": 100})
+            payload.update(job["files"] or {})
+            if job["format_errors"]:
+                payload["format_errors"] = job["format_errors"]
+        elif job["status"] == "error":
+            payload.update({"status": "error", "error": job["error"]})
+        elif job["status"] == "cancelled":
+            payload["status"] = "cancelled"
+        elif job["status"] == "paused":
+            payload.update({"status": "paused", "error": job["message"]})
+
+        self._send_json(payload)
 
     def _handle_get_settings(self):
         """Return current settings."""
@@ -342,6 +397,8 @@ class DownloaderHandler(SimpleHTTPRequestHandler):
             # duracion que deberia tener y cuantas pistas se esperaban.
             "duration_seconds": item.get("duration_seconds"),
             "expected_tracks": item.get("expected_tracks"),
+            "audio_seconds": item.get("audio_seconds"),
+            "incomplete": bool(item.get("incomplete")),
             # `titled` en falso significa que la obra se descargo antes de que
             # se guardaran los nombres de capitulo: la UI lo dice en vez de
             # inventarlos.
@@ -531,6 +588,61 @@ class DownloaderHandler(SimpleHTTPRequestHandler):
             traceback.print_exc()
             self._send_json({"error": str(e)}, 500)
 
+    def _handle_watchlist_add(self, data: dict):
+        """Guarda un titulo para descargarlo mas tarde.
+
+        Se guardan los datos que ya trae la busqueda (titulo, autores, portada)
+        para poder pintar la lista sin sesion valida: si solo guardaramos el id,
+        abrir "Para despues" con las cookies caducadas mostraria una lista de
+        numeros.
+        """
+        try:
+            entry = self.kernel["watchlist"].add(data)
+        except ValueError as exc:
+            self._send_json({"error": str(exc)}, 400)
+            return
+        self._send_json({"success": True, "entry": entry})
+
+    def _handle_chapter_names(self, data: dict):
+        """Recupera los nombres de capitulo de un audiolibro ya descargado.
+
+        Los nombres solo existen en la API de O'Reilly: los archivos se
+        renombran a 001.m4a al publicar y no llevan etiquetas. Necesita sesion
+        valida, asi que puede fallar por cookies caducadas — y eso se dice.
+        """
+        folder = (data.get("folder") or "").strip()
+        item = self._library_item(folder)
+        if item is None:
+            self._send_json({"error": "no encuentro esa obra"}, 404)
+            return
+        if item.get("content_type") != "audiobook":
+            self._send_json({"error": "solo aplica a audiolibros"}, 400)
+            return
+        book_id = item.get("book_id")
+        if not book_id:
+            self._send_json({"error": "la obra no tiene book_id"}, 400)
+            return
+
+        try:
+            chapters = self.kernel["audiobook"].fetch_chapters(book_id)
+        except Exception as exc:  # noqa: BLE001
+            traceback.print_exc()
+            self._send_json({
+                "error": f"no se pudieron pedir los capítulos: {exc}. "
+                         "Si la sesión caducó, pega cookies nuevas."
+            }, 502)
+            return
+
+        library = self.kernel["library"]
+        written = library.set_track_titles(item, chapters)
+        if not written:
+            self._send_json({"error": "la API no devolvió nombres usables"}, 502)
+            return
+
+        library.rebuild_index()
+        self._send_json({"success": True, "titled": written,
+                         "chapters": len(chapters)})
+
     def _handle_transfer(self, data: dict):
         """Encola el paso a la biblioteca de una o varias obras en cache.
 
@@ -718,19 +830,21 @@ class DownloaderHandler(SimpleHTTPRequestHandler):
         try:
             config.COOKIES_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
             self.kernel.http.reload_cookies()
-            self._send_json({"success": True})
+            # Cookies nuevas: lo que estuviera pausado por sesion caducada
+            # puede seguir, y sigue desde donde iba.
+            resumed = self.kernel["queue"].session_refreshed()
+            self._send_json({"success": True, "resumed": resumed})
         except Exception as e:
             self._send_json({"error": str(e)}, 500)
 
     def _handle_cancel(self):
-        """Request cancellation of the current download."""
-        with self._progress_lock:
-            status = self.download_progress.get("status")
-            if status and status not in ("completed", "error", "cancelled"):
-                DownloaderHandler._cancel_requested = True
-                self._send_json({"success": True, "message": "Cancel requested"})
-            else:
-                self._send_json({"success": False, "message": "No active download"})
+        """Cancela el trabajo en curso (compatibilidad con la UI actual)."""
+        queue = self.kernel["queue"]
+        running = queue.snapshot().get("running_id")
+        if running and queue.cancel(running):
+            self._send_json({"success": True, "message": "Cancel requested"})
+        else:
+            self._send_json({"success": False, "message": "No active download"})
 
     def _handle_reveal(self, data: dict):
         """Open file manager and select the specified file."""
@@ -794,18 +908,15 @@ class DownloaderHandler(SimpleHTTPRequestHandler):
             else:
                 output_dir = output_plugin.get_default_dir()
 
-            with self._progress_lock:
-                status = self.download_progress.get("status")
-                if status and status not in ("completed", "error", "cancelled"):
-                    self._send_json({"error": "Download already in progress"}, 409)
-                    return
-
-            threading.Thread(
-                target=self._download_audiobook_async,
-                args=(book_id, output_dir, selected_chapters, transfer),
-                daemon=True,
-            ).start()
-            self._send_json({"status": "started", "book_id": book_id})
+            job = self.kernel["queue"].enqueue(
+                book_id=book_id,
+                title=data.get("title") or book_id,
+                content_type="audiobook",
+                chapters=selected_chapters,
+                transfer=transfer,
+            )
+            self._send_json({"status": "queued", "book_id": book_id,
+                             "job_id": job.id, "job_status": job.status})
             return
 
         # Parse chunking config
@@ -829,145 +940,24 @@ class DownloaderHandler(SimpleHTTPRequestHandler):
         else:
             output_dir = output_plugin.get_default_dir()
 
-        # Check if already downloading
-        with self._progress_lock:
-            status = self.download_progress.get("status")
-            if status and status not in ("completed", "error", "cancelled"):
-                self._send_json({"error": "Download already in progress"}, 409)
-                return
-
         # Parse formats using plugin (single source of truth)
         from plugins.downloader import DownloaderPlugin
         formats = DownloaderPlugin.parse_formats(output_format)
-        print(f"[DEBUG] Parsed formats: {formats}")
 
-        # Start download in background thread
-        thread = threading.Thread(
-            target=self._download_book_async,
-            args=(book_id, output_dir, formats, selected_chapters, skip_images,
-                  chunk_config, target_lang, transfer),
-            daemon=True,
+        # A la cola. Ya no se rechaza la segunda descarga: se pone detras.
+        job = self.kernel["queue"].enqueue(
+            book_id=book_id,
+            title=data.get("title") or book_id,
+            content_type="book",
+            formats=formats,
+            target_lang=target_lang,
+            skip_images=skip_images,
+            transfer=transfer,
+            chapters=selected_chapters,
+            chunking=chunking_opts or None,
         )
-        thread.start()
-
-        # Return immediately
-        self._send_json({"status": "started", "book_id": book_id})
-
-    def _download_book_async(
-        self,
-        book_id: str,
-        output_dir: Path,
-        formats: list[str],
-        selected_chapters: list | None,
-        skip_images: bool,
-        chunk_config: ChunkConfig | None,
-        target_lang: str | None = None,
-        transfer: bool = True,
-    ):
-        """Background download wrapper with error handling."""
-        # Reset cancel flag
-        DownloaderHandler._cancel_requested = False
-
-        try:
-            downloader = self.kernel["downloader"]
-            result = downloader.download(
-                book_id=book_id,
-                output_dir=output_dir,
-                formats=formats,
-                selected_chapters=selected_chapters,
-                skip_images=skip_images,
-                chunk_config=chunk_config,
-                target_lang=target_lang,
-                transfer=transfer,
-                progress_callback=self._on_progress,
-                cancel_check=lambda: DownloaderHandler._cancel_requested,
-            )
-
-            payload = {
-                "status": "completed",
-                "book_id": result.book_id,
-                "title": result.title,
-                "percentage": 100,
-                **result.files,
-            }
-            # Formatos que fallaron: la descarga sirvió, pero el usuario debe
-            # saber que falta algo en vez de creer que todo salió bien.
-            if result.errors:
-                payload["format_errors"] = result.errors
-            self._set_progress(payload)
-        except Exception as e:
-            traceback.print_exc()
-            error_msg = str(e)
-            if "cancelled" in error_msg.lower():
-                self._set_progress({"status": "cancelled", "error": error_msg})
-            else:
-                self._set_progress({"status": "error", "error": error_msg})
-
-    def _download_audiobook_async(
-        self,
-        book_id: str,
-        output_dir: Path,
-        selected_chapters: list | None,
-        transfer: bool = True,
-    ):
-        """Background audiobook download.
-
-        El plugin reporta con kwargs sueltos (no DownloadProgress), asi que
-        aqui se adaptan al mismo diccionario de progreso que consume la UI.
-        """
-        DownloaderHandler._cancel_requested = False
-
-        def on_progress(**kw):
-            payload = {"book_id": book_id, "content_type": "audiobook"}
-            payload.update(kw)
-            self._set_progress(payload)
-
-        try:
-            result = self.kernel["audiobook"].download(
-                book_id=book_id,
-                output_dir=output_dir,
-                selected_chapters=selected_chapters,
-                transfer=transfer,
-                progress_callback=on_progress,
-                cancel_check=lambda: DownloaderHandler._cancel_requested,
-            )
-            payload = {
-                "status": "completed",
-                "book_id": result.book_id,
-                "title": result.title,
-                "percentage": 100,
-                "content_type": "audiobook",
-                "audiobook": str(result.output_dir),
-                "tracks": len(result.files),
-            }
-            if result.errors:
-                payload["format_errors"] = result.errors
-            self._set_progress(payload)
-        except Exception as e:
-            traceback.print_exc()
-            cancelled = "cancel" in str(e).lower()
-            self._set_progress({
-                "status": "cancelled" if cancelled else "error",
-                "book_id": book_id,
-                "error": str(e),
-                "content_type": "audiobook",
-            })
-
-    def _on_progress(self, progress: DownloadProgress):
-        """Handle progress updates from the downloader plugin."""
-        self._set_progress(
-            {
-                "status": progress.status,
-                "book_id": progress.book_id,
-                "percentage": progress.percentage,
-                "message": progress.message,
-                "eta_seconds": progress.eta_seconds,
-                "current_chapter": progress.current_chapter,
-                "total_chapters": progress.total_chapters,
-                "chapter_title": progress.chapter_title,
-                "resumed_chapters": progress.resumed_chapters,
-            }
-        )
+        self._send_json({"status": "queued", "book_id": book_id,
+                         "job_id": job.id, "job_status": job.status})
 
     def _send_json(self, data: dict, status: int = 200):
         self.send_response(status)
@@ -988,6 +978,21 @@ def create_server(host: str = "localhost", port: int = 8000) -> ThreadingHTTPSer
     """
     kernel = create_default_kernel()
     DownloaderHandler.kernel = kernel
+
+    # Una cola pausada esperando cookies puede durar horas; reiniciar el
+    # servidor no deberia costarte lo que ya habias encolado.
+    queue = kernel["queue"]
+    # Solo un servidor EJECUTA la cola: dos apuntando al mismo data/ bajarian lo
+    # mismo a la vez, sobre las mismas carpetas y al doble de peticiones. Pero
+    # leerla la leen los dos, para que el segundo pueda mostrarla — el worker es
+    # lo unico que queda reservado al dueno.
+    owner = queue.claim()
+    restored = queue.load()
+    if restored:
+        print(f"[QUEUE] {restored} descarga(s) recuperadas de la sesion anterior")
+    if not owner:
+        print("[QUEUE] otro servidor ya esta ejecutando la cola: "
+              "este solo la muestra, no descarga")
 
     server = ThreadingHTTPServer((host, port), DownloaderHandler)
     return server

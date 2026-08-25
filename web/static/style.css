@@ -479,8 +479,8 @@ input[type="checkbox"] {
     top: 50%;
     left: 50%;
     transform: translate(-50%, -50%);
-    width: min(760px, calc(100vw - 2rem));
-    max-height: 86vh;
+    width: min(900px, calc(100vw - 2rem));
+    max-height: 94vh;
     overflow-y: auto;
     overscroll-behavior: contain;
     z-index: 60;
@@ -676,6 +676,10 @@ input[type="checkbox"] {
 .fmt-badge.fmt-markdown { background: #0f766e; }
 .fmt-badge.fmt-json,
 .fmt-badge.fmt-jsonl { background: #b45309; }
+/* INCOMPLETO va primero y en rojo: no es un estado de gestion como LOCAL,
+   es contenido que te falta. */
+.fmt-badge.is-partial { background: #d4002d; }
+
 /* LOCAL no es un formato: es un estado (en cache, sin pasar a la biblioteca) */
 .fmt-badge.loc-local { background: #d97706; }
 
@@ -1482,4 +1486,649 @@ body.reader-open { overflow: hidden; }
     .reader-shell { border-radius: 0; }
     .reader-page-btn { width: 34px; font-size: 1.25rem; }
     .reader-toc { position: absolute; inset: 0 auto 0 0; z-index: 2; }
+}
+
+/* Confirmación al cambiar la carpeta de la biblioteca. Vive dentro del modal
+   de ajustes en vez de ser un confirm() del navegador: así puede explicar la
+   consecuencia con el número de obras concreto. */
+.settings-confirm {
+    margin-top: 8px;
+    padding: 10px 12px;
+    border-radius: 8px;
+    font-size: 0.75rem;
+    line-height: 1.5;
+    color: #92400e;
+    background: #fffbeb;
+    border: 1px solid #fde68a;
+}
+
+.settings-confirm-row {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-top: 8px;
+}
+
+.settings-confirm-btn {
+    padding: 5px 10px;
+    border-radius: 6px;
+    font-size: 0.75rem;
+    font-weight: 500;
+    color: #52525b;
+    background: #fff;
+    border: 1px solid #e4e4e7;
+}
+
+.settings-confirm-btn:hover { background: #f4f4f5; }
+
+.settings-confirm-btn.is-danger {
+    color: #fff;
+    background: #d97706;
+    border-color: #d97706;
+}
+
+.settings-confirm-btn.is-danger:hover { background: #b45309; }
+
+.settings-confirm-btn:focus-visible {
+    outline: 2px solid #0073e6;
+    outline-offset: 2px;
+}
+
+.dark .settings-confirm {
+    color: #fcd34d;
+    background: rgba(120, 53, 15, .22);
+    border-color: rgba(180, 83, 9, .45);
+}
+
+.dark .settings-confirm-btn {
+    color: #d4d4d8;
+    background: #26262c;
+    border-color: #3f3f46;
+}
+
+/* El aviso de "sin nombres de capítulo" pasó a llevar acción, así que necesita
+   layout propio en vez de ser solo un párrafo. */
+.player-note { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.player-note p { margin: 0; }
+
+.player-note-btn {
+    flex: 0 0 auto;
+    padding: 6px 12px;
+    border-radius: 8px;
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: #fff;
+    background: #b45309;
+    transition: background-color .15s ease;
+}
+
+.player-note-btn:hover { background: #92400e; }
+.player-note-btn:disabled { background: #d4d4d8; color: #52525b; cursor: not-allowed; }
+.player-note-btn:focus-visible { outline: 2px solid #0073e6; outline-offset: 2px; }
+
+/* =====================================================================
+   Descargas múltiples
+   ===================================================================== */
+
+/* Checkbox sobre la tarjeta, solo en modo selección */
+.batch-check {
+    position: absolute;
+    top: 8px;
+    left: 8px;
+    z-index: 4;
+    display: grid;
+    place-items: center;
+    width: 26px;
+    height: 26px;
+    border-radius: 7px;
+    background: rgba(255, 255, 255, .92);
+    box-shadow: 0 1px 4px rgba(0, 0, 0, .25);
+    cursor: pointer;
+}
+
+.batch-check input { width: 16px; height: 16px; cursor: pointer; }
+
+#search-results .book-card { position: relative; }
+
+body.batch-mode #search-results .book-card { cursor: pointer; }
+
+#search-results .book-card.is-selected {
+    outline: 2px solid #0073e6;
+    outline-offset: -2px;
+}
+
+/* Barra flotante con el conteo */
+#batch-bar {
+    position: fixed;
+    left: 50%;
+    bottom: 24px;
+    transform: translateX(-50%);
+    z-index: 55;
+    display: flex;
+    align-items: center;
+    gap: 20px;
+    padding: 12px 18px;
+    border-radius: 12px;
+    background: #18181b;
+    color: #fafafa;
+    font-size: 0.875rem;
+    box-shadow: 0 12px 32px rgba(0, 0, 0, .35);
+}
+
+.batch-bar-actions { display: flex; gap: 8px; }
+
+.batch-btn {
+    padding: 7px 14px;
+    border-radius: 8px;
+    font-size: 0.8125rem;
+    font-weight: 500;
+    color: #3f3f46;
+    background: #f4f4f5;
+    border: 1px solid #e4e4e7;
+    transition: background-color .15s ease;
+}
+
+.batch-btn:hover { background: #e4e4e7; }
+.batch-btn.is-primary { color: #fff; background: #0073e6; border-color: #0073e6; }
+.batch-btn.is-primary:hover { background: #005bb5; }
+.batch-btn.is-small { padding: 4px 9px; font-size: 0.6875rem; }
+.batch-btn:focus-visible { outline: 2px solid #0073e6; outline-offset: 2px; }
+
+#batch-bar .batch-btn { background: #3f3f46; border-color: #52525b; color: #fafafa; }
+#batch-bar .batch-btn:hover { background: #52525b; }
+#batch-bar .batch-btn.is-primary { background: #0073e6; border-color: #0073e6; }
+
+/* Modal */
+body.batch-open { overflow: hidden; }
+
+#batch-modal {
+    position: fixed;
+    inset: 0;
+    z-index: 70;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+    background: rgba(9, 9, 11, .6);
+    backdrop-filter: blur(2px);
+}
+
+.batch-shell {
+    display: flex;
+    flex-direction: column;
+    width: min(720px, 100%);
+    max-height: 86vh;
+    border-radius: 14px;
+    overflow: hidden;
+    background: #fff;
+    box-shadow: 0 24px 64px rgba(0, 0, 0, .4);
+}
+
+.batch-head { padding: 18px 20px 12px; border-bottom: 1px solid #f4f4f5; }
+.batch-head h3 { font-size: 1.0625rem; font-weight: 600; color: #18181b; }
+
+.batch-list { flex: 1 1 auto; overflow-y: auto; padding: 8px 12px; }
+
+.batch-item {
+    border: 1px solid #e4e4e7;
+    border-radius: 10px;
+    margin-bottom: 8px;
+    overflow: hidden;
+}
+
+.batch-item-head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 11px 13px;
+    cursor: pointer;
+}
+
+.batch-item-panel:not(.hidden) + .batch-item-head,
+.batch-item[data-status] .batch-item-head { cursor: default; }
+
+.batch-caret { width: 12px; font-size: 0.75rem; color: #a1a1aa; }
+
+.batch-item-title {
+    flex: 1 1 auto;
+    min-width: 0;
+    font-size: 0.875rem;
+    font-weight: 500;
+    color: #18181b;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.batch-item-meta { flex: 0 0 auto; font-size: 0.6875rem; color: #a1a1aa; }
+
+.batch-item-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 12px 13px 14px;
+    border-top: 1px solid #f4f4f5;
+    background: #fafafa;
+}
+
+.batch-field {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 0.75rem;
+    color: #71717a;
+}
+
+.batch-field select {
+    flex: 1 1 auto;
+    height: 32px;
+    padding: 0 8px;
+    border: 1px solid #e4e4e7;
+    border-radius: 7px;
+    font-size: 0.8125rem;
+    background: #fff;
+    color: #3f3f46;
+}
+
+.batch-skip { display: flex; align-items: flex-start; gap: 8px; cursor: pointer; }
+.batch-skip span { font-size: 0.8125rem; color: #3f3f46; }
+.batch-hint { display: block; font-size: 0.6875rem; color: #a1a1aa; }
+
+/* Progreso por elemento */
+.batch-progress {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 0 13px 12px;
+}
+
+.batch-bar-track {
+    flex: 1 1 auto;
+    height: 6px;
+    border-radius: 3px;
+    background: #e4e4e7;
+    overflow: hidden;
+}
+
+.batch-bar-fill {
+    height: 100%;
+    width: 0;
+    border-radius: 3px;
+    background: #0073e6;
+    transition: width .3s ease;
+}
+
+.batch-bar-fill.is-paused { background: #d97706; }
+.batch-bar-fill.is-error { background: #d4002d; }
+
+.batch-state {
+    flex: 0 0 auto;
+    min-width: 120px;
+    font-size: 0.6875rem;
+    color: #71717a;
+    text-align: right;
+}
+
+.batch-item[data-status="completed"] { border-color: #a7f3d0; }
+.batch-item[data-status="error"] { border-color: #fecaca; }
+
+.batch-foot {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    padding: 14px 20px;
+    border-top: 1px solid #f4f4f5;
+}
+
+.batch-paused {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
+    margin: 0 12px 8px;
+    padding: 11px 13px;
+    border-radius: 9px;
+    font-size: 0.75rem;
+    color: #92400e;
+    background: #fffbeb;
+    border: 1px solid #fde68a;
+}
+
+/* Aviso flotante cuando la modal está cerrada */
+#batch-pill {
+    position: fixed;
+    right: 20px;
+    bottom: 20px;
+    z-index: 55;
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    padding: 11px 16px;
+    border-radius: 999px;
+    font-size: 0.8125rem;
+    font-weight: 500;
+    color: #fafafa;
+    background: #18181b;
+    box-shadow: 0 10px 28px rgba(0, 0, 0, .35);
+}
+
+#batch-pill:hover { background: #27272a; }
+
+.batch-pill-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: #22c55e;
+    animation: pulseSubtle 1.6s ease-in-out infinite;
+}
+
+@keyframes pulseSubtle { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
+
+/* Modo oscuro */
+.dark .batch-shell { background: #1e1e23; }
+.dark .batch-head { border-bottom-color: #2f2f37; }
+.dark .batch-head h3 { color: #fafafa; }
+.dark .batch-item { border-color: #2f2f37; }
+.dark .batch-item-title { color: #fafafa; }
+.dark .batch-item-panel { background: #26262c; border-top-color: #2f2f37; }
+.dark .batch-field select { background: #1e1e23; border-color: #3f3f46; color: #d4d4d8; }
+.dark .batch-skip span { color: #d4d4d8; }
+.dark .batch-btn { background: #26262c; border-color: #3f3f46; color: #d4d4d8; }
+.dark .batch-btn:hover { background: #2f2f37; }
+.dark .batch-foot { border-top-color: #2f2f37; }
+.dark .batch-bar-track { background: #3f3f46; }
+.dark .batch-check { background: rgba(30, 30, 35, .92); }
+.dark .batch-paused {
+    color: #fcd34d;
+    background: rgba(120, 53, 15, .22);
+    border-color: rgba(180, 83, 9, .45);
+}
+
+/* =====================================================================
+   Menú "Mis libros" y sección "Para después"
+   ===================================================================== */
+.nav-menu { position: relative; }
+
+.nav-caret { font-size: 0.625rem; opacity: .6; margin-left: 2px; }
+
+.nav-menu-list {
+    position: absolute;
+    top: calc(100% + 6px);
+    left: 0;
+    z-index: 45;
+    min-width: 210px;
+    padding: 5px;
+    border-radius: 10px;
+    background: #fff;
+    border: 1px solid #e4e4e7;
+    box-shadow: 0 12px 28px rgba(0, 0, 0, .16);
+}
+
+.nav-menu-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    width: 100%;
+    padding: 8px 11px;
+    border-radius: 7px;
+    font-size: 0.875rem;
+    color: #3f3f46;
+    text-align: left;
+    transition: background-color .12s ease;
+}
+
+.nav-menu-item:hover { background: #f4f4f5; }
+.nav-menu-item.ct-active { color: #0073e6; font-weight: 600; }
+
+.nav-menu-item:focus-visible {
+    outline: 2px solid #0073e6;
+    outline-offset: -2px;
+}
+
+.nav-menu-count {
+    flex: 0 0 auto;
+    min-width: 20px;
+    padding: 1px 6px;
+    border-radius: 999px;
+    font-size: 0.6875rem;
+    font-variant-numeric: tabular-nums;
+    text-align: center;
+    color: #71717a;
+    background: #f4f4f5;
+}
+
+/* Estrella sobre la portada en los resultados de búsqueda */
+.wl-btn {
+    position: absolute;
+    top: 6px;
+    right: 6px;
+    z-index: 3;
+    display: grid;
+    place-items: center;
+    width: 26px;
+    height: 26px;
+    border-radius: 7px;
+    font-size: 0.9375rem;
+    line-height: 1;
+    color: #fff;
+    background: rgba(9, 9, 11, .55);
+    opacity: 0;
+    transition: opacity .15s ease, background-color .15s ease;
+}
+
+.book-card:hover .wl-btn,
+.wl-btn.is-on,
+.wl-btn:focus-visible { opacity: 1; }
+
+.wl-btn:hover { background: rgba(9, 9, 11, .8); }
+.wl-btn.is-on { color: #fbbf24; background: rgba(9, 9, 11, .72); }
+
+.wl-btn:focus-visible {
+    outline: 2px solid #fff;
+    outline-offset: 1px;
+}
+
+.fmt-badge.wl-ribbon { background: #7c3aed; }
+
+/* La sección */
+#watchlist-view { display: none; }
+#watchlist-view.is-open { display: block; }
+
+.wl-row {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding: 12px 14px;
+    margin-bottom: 8px;
+    border: 1px solid #e4e4e7;
+    border-radius: 11px;
+    background: #fff;
+}
+
+.wl-cover {
+    flex: 0 0 auto;
+    width: 46px;
+    height: 66px;
+    border-radius: 5px;
+    overflow: hidden;
+    background: #f4f4f5;
+}
+
+.wl-cover img { width: 100%; height: 100%; object-fit: cover; }
+
+.wl-info { flex: 1 1 auto; min-width: 0; }
+
+.wl-title {
+    font-size: 0.9375rem;
+    font-weight: 600;
+    color: #18181b;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.wl-meta {
+    margin-top: 2px;
+    font-size: 0.75rem;
+    color: #a1a1aa;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.wl-state { margin-top: 4px; font-size: 0.75rem; color: #71717a; }
+.wl-state.is-done { color: #059669; font-weight: 600; }
+
+.wl-actions { flex: 0 0 auto; display: flex; gap: 6px; flex-wrap: wrap; }
+
+.wl-btn-action {
+    padding: 6px 11px;
+    border-radius: 7px;
+    font-size: 0.75rem;
+    font-weight: 500;
+    color: #3f3f46;
+    background: #f4f4f5;
+    border: 1px solid #e4e4e7;
+    transition: background-color .15s ease;
+}
+
+.wl-btn-action:hover { background: #e4e4e7; }
+.wl-btn-action.is-primary { color: #fff; background: #0073e6; border-color: #0073e6; }
+.wl-btn-action.is-primary:hover { background: #005bb5; }
+.wl-btn-action.is-danger { color: #d4002d; }
+.wl-btn-action.is-danger:hover { background: #fef2f2; }
+.wl-btn-action:disabled { opacity: .5; cursor: not-allowed; }
+.wl-btn-action:focus-visible { outline: 2px solid #0073e6; outline-offset: 2px; }
+
+@media (max-width: 640px) {
+    .wl-row { flex-wrap: wrap; }
+    .wl-actions { width: 100%; }
+}
+
+/* Modo oscuro */
+.dark .nav-menu-list { background: #1e1e23; border-color: #2f2f37; }
+.dark .nav-menu-item { color: #d4d4d8; }
+.dark .nav-menu-item:hover { background: #2f2f37; }
+.dark .nav-menu-count { background: #2f2f37; color: #a1a1aa; }
+.dark .wl-row { background: #1e1e23; border-color: #2f2f37; }
+.dark .wl-title { color: #fafafa; }
+.dark .wl-cover { background: #26262c; }
+.dark .wl-btn-action { background: #26262c; border-color: #3f3f46; color: #d4d4d8; }
+.dark .wl-btn-action:hover { background: #2f2f37; }
+.dark .wl-btn-action.is-primary { background: #0073e6; border-color: #0073e6; color: #fff; }
+
+/* Confirmacion de "Limpiar descargados". Reusa el chrome de la modal de
+   descargas (.batch-shell / .batch-head / .batch-foot) para no duplicar el
+   tema claro y oscuro en dos sitios. */
+#wl-confirm {
+    position: fixed;
+    inset: 0;
+    z-index: 80;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+    background: rgba(9, 9, 11, .6);
+    backdrop-filter: blur(2px);
+}
+
+#wl-confirm .batch-shell { width: min(420px, 100%); }
+
+.wl-confirm-text {
+    padding: 16px 20px;
+    font-size: 0.875rem;
+    line-height: 1.55;
+    color: #3f3f46;
+}
+
+.dark .wl-confirm-text { color: #d4d4d8; }
+
+/* Formulario de cookies dentro de la modal de descargas. Vive aquí y no en el
+   modal de cookies (z-50) porque este es z-70: se abría por detrás y parecía
+   que el botón no hacía nada. */
+.batch-paused {
+    flex-direction: column;
+    align-items: stretch;
+    /* El aviso se estiraba mas alla de la modal y el texto y los botones
+       acababan cortados por la derecha (.batch-shell recorta). La causa: en un
+       contenedor flex en COLUMNA el ancho de la linea lo fija el hijo mas ancho,
+       y el snippet es una linea larga sin espacios donde partir. `min-width: 0`
+       no basta para eso — hace falta un techo explicito. */
+    min-width: 0;
+    max-width: 100%;
+}
+
+.batch-paused-text { margin: 0 0 8px; }
+
+/* El snippet y su boton, en una fila: el snippet ocupa lo que sobra y hace
+   scroll horizontal dentro de si mismo. */
+.batch-paused-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    /* `width: 100%` no es decorativo: le da un ancho DEFINIDO a la fila. Sin el
+       se dimensionaba a max-content (la linea larga del snippet), se salia de su
+       propio padre y arrastraba fuera de la modal al texto y a los dos botones.
+       Con ancho definido, el snippet flexa dentro y su overflow-x se encarga. */
+    width: 100%;
+    min-width: 0;
+    margin-bottom: 8px;
+}
+
+.batch-paused-copy { flex: 0 0 auto; }
+
+.batch-paused-snippet {
+    /* base 0 a proposito: asi su contenido no cuenta para el ancho minimo de la
+       fila, y el overflow-x de abajo es el que se encarga de la linea larga. */
+    flex: 1 1 0;
+    min-width: 0;
+    display: block;
+    padding: 7px 9px;
+    border-radius: 6px;
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 0.625rem;
+    line-height: 1.5;
+    color: #fafafa;
+    background: #18181b;
+    overflow-x: auto;
+    white-space: nowrap;
+    user-select: all;
+}
+
+.batch-paused-input {
+    width: 100%;
+    min-width: 0;
+    padding: 8px 10px;
+    border: 1px solid #fde68a;
+    border-radius: 7px;
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 0.6875rem;
+    resize: vertical;
+    background: #fff;
+    color: #3f3f46;
+}
+
+.batch-paused-input:focus {
+    outline: none;
+    border-color: #d97706;
+}
+
+.batch-paused-error {
+    margin: 6px 0 0;
+    font-size: 0.6875rem;
+    font-weight: 500;
+    color: #b91c1c;
+}
+
+/* Solo el boton de accion del aviso. Con el selector sin `>` esto tambien
+   pegaba al de copiar, que vive dentro de la fila del snippet, y lo mandaba
+   a su propia linea. */
+.batch-paused > .batch-btn { align-self: flex-end; margin-top: 8px; }
+
+.dark .batch-paused-input {
+    background: #1e1e23;
+    border-color: rgba(180, 83, 9, .5);
+    color: #d4d4d8;
 }

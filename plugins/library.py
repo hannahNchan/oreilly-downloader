@@ -158,6 +158,48 @@ class LibraryPlugin(Plugin):
         return False
 
     @staticmethod
+    def _mp4_duration(path: Path) -> float | None:
+        """Duracion en segundos de un .m4a/.mp4, leyendo el atomo `mvhd`.
+
+        Se hace a mano en vez de con una libreria de tags: solo hacen falta dos
+        enteros de la cabecera, y anadir una dependencia para eso seria caro.
+        `moov` puede estar al principio o al final del archivo, asi que se
+        buscan los dos extremos en vez de leerlo entero.
+        """
+        try:
+            size = path.stat().st_size
+            with path.open("rb") as fh:
+                head = fh.read(min(size, 128 * 1024))
+                at = head.find(b"mvhd")
+                blob, base = head, 0
+                if at == -1:
+                    tail_len = min(size, 1024 * 1024)
+                    fh.seek(size - tail_len)
+                    blob = fh.read(tail_len)
+                    base = size - tail_len
+                    at = blob.find(b"mvhd")
+                    if at == -1:
+                        return None
+
+            version = blob[at + 4]
+            # Tras 'mvhd' van version(1) + flags(3), luego las fechas y el
+            # timescale. La version 1 usa enteros de 64 bits para las fechas.
+            offset = at + 8 + (16 if version == 1 else 8)
+            if version == 1:
+                timescale = int.from_bytes(blob[offset:offset + 4], "big")
+                duration = int.from_bytes(blob[offset + 4:offset + 12], "big")
+            else:
+                timescale = int.from_bytes(blob[offset:offset + 4], "big")
+                duration = int.from_bytes(blob[offset + 4:offset + 8], "big")
+            if not timescale or not duration:
+                return None
+            seconds = duration / timescale
+            # Un valor absurdo significa que se leyo basura, no una duracion
+            return seconds if 0 < seconds < 200000 else None
+        except (OSError, IndexError, ZeroDivisionError):
+            return None
+
+    @staticmethod
     def _read_sidecar(folder: Path) -> dict:
         try:
             return json.loads((folder / SIDECAR_FILE).read_text(encoding="utf-8"))
@@ -460,6 +502,24 @@ class LibraryPlugin(Plugin):
                 meta["size_bytes"] = sum(f.stat().st_size for f in files)
                 meta["tracks"] = sum(1 for f in files
                                      if f.suffix.lower() in AUDIO_SUFFIXES)
+                # Completitud de un audiolibro: se compara lo que hay en
+                # disco contra lo que deberia haber. Publicar un audiolibro al
+                # 5% sin decirlo fue exactamente el fallo que esto evita.
+                if meta.get("content_type") == "audiobook":
+                    tracks = [f for f in files
+                              if f.suffix.lower() in AUDIO_SUFFIXES]
+                    seconds = sum(self._mp4_duration(f) or 0 for f in tracks)
+                    meta["audio_seconds"] = round(seconds) or None
+                    expected_n = meta.get("expected_tracks")
+                    try:
+                        expected_s = float(meta.get("duration_seconds") or 0)
+                    except (TypeError, ValueError):
+                        expected_s = 0
+                    meta["incomplete"] = bool(
+                        (expected_n and len(tracks) < int(expected_n))
+                        or (expected_s and seconds and seconds < expected_s * 0.9)
+                    )
+
                 meta["rel"] = obj.relative_to(root).as_posix()
                 # La carpeta ES la direccion del objeto: si el metadata.json
                 # dice otra cosa, se equivoca el metadata.
@@ -575,7 +635,8 @@ class LibraryPlugin(Plugin):
                 "cover_local": bool(entry.get("has_cover")),
                 "duration_seconds": entry.get("duration_seconds"),
                 "expected_tracks": entry.get("expected_tracks"),
-                "related_ourn": entry.get("related_ourn"),
+                "audio_seconds": entry.get("audio_seconds"),
+                "incomplete": bool(entry.get("incomplete")),
                 "work_id": wid,
                 "rel": rel,
                 "mtime": 0,
@@ -618,8 +679,81 @@ class LibraryPlugin(Plugin):
                 "title": title or f"Capítulo {n}",
                 "titled": bool(title),
                 "bytes": f.stat().st_size,
+                # La da el servidor leyendo la cabecera del MP4. Antes el
+                # reproductor abria las 29 pistas para averiguarlas.
+                "seconds": self._mp4_duration(f),
             })
         return out
+
+    def set_track_titles(self, item: dict, chapters: list) -> int:
+        """Escribe los titulos de capitulo de un audiolibro ya descargado.
+
+        Los audiolibros bajados antes de que se guardaran los nombres solo
+        tienen 001.m4a, 002.m4a... Aqui se rellenan a posteriori con lo que
+        devuelve la API, tanto en el sidecar como en metadata.json, que es de
+        donde los lee el reproductor.
+
+        Devuelve cuantas pistas quedaron con nombre.
+        """
+        base = Path(item.get("path") or "")
+        if not base.is_dir() or not chapters:
+            return 0
+
+        tracks = self.tracks_for(item)
+        if not tracks:
+            return 0
+
+        # Se emparejan por orden. Si la descarga quedo incompleta hay menos
+        # pistas que capitulos, y las que hay siguen siendo las primeras.
+        nested = base / "audiobook"
+        source = nested if nested.is_dir() else base
+        files = sorted(p for p in source.iterdir()
+                       if p.is_file() and p.suffix.lower() in AUDIO_SUFFIXES)
+
+        entries = []
+        for n, f in enumerate(files, start=1):
+            if n > len(chapters):
+                break
+            ch = chapters[n - 1]
+            title = getattr(ch, "title", None) or (
+                ch.get("title") if isinstance(ch, dict) else None)
+            if not title:
+                continue
+            entries.append({
+                "n": n,
+                "file": f.name,
+                "title": title.strip(),
+                "duration": getattr(ch, "duration", None) or (
+                    ch.get("duration") if isinstance(ch, dict) else None),
+            })
+
+        if not entries:
+            return 0
+
+        meta_file = base / "metadata.json"
+        try:
+            meta = json.loads(meta_file.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            meta = {}
+        meta["tracks"] = entries
+        # `expected_tracks` es lo que permite detectar una descarga a medias, y
+        # ahora que la API respondio ya se sabe cuantos capitulos hay de verdad.
+        meta["expected_tracks"] = len(chapters)
+        meta_file.write_text(
+            json.dumps(meta, ensure_ascii=False, indent=1), encoding="utf-8")
+
+        sidecar = base / SIDECAR_FILE
+        if sidecar.is_file():
+            data = self._read_sidecar(base)
+            data["chapters"] = [
+                {"n": e["n"], "title": e["title"], "duration": e["duration"]}
+                for e in entries
+            ]
+            data["expected_tracks"] = len(chapters)
+            sidecar.write_text(
+                json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+
+        return len(entries)
 
     def book_path(self, item: dict, kind: str = "epub") -> Path | None:
         """Archivo del libro (epub/pdf) de una obra, o None.

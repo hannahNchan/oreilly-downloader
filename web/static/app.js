@@ -160,7 +160,6 @@ async function startTransfer(payload) {
    quitarla y volver a mostrarlos — instantaneo y sin repedir la biblioteca. */
 
 const PLAYER_POS_KEY = 'oi-player-pos';   // { folder: { track, time } }
-const PLAYER_DUR_KEY = 'oi-player-dur';   // { folder: { n: segundos } }
 const PLAYER_SPEEDS = [0.75, 1, 1.25, 1.5, 1.75, 2];
 
 let playerView = null;    // el <section> insertado, o null si esta cerrado
@@ -409,10 +408,43 @@ function renderPlayer(item, data) {
     const titled = tracks.some(function (t) { return t.titled; });
     playerView.append(backButton(), top, list, audio);
     if (!titled) {
-        const nota = document.createElement('p');
+        const nota = document.createElement('div');
         nota.className = 'player-note';
-        nota.textContent = 'Este audiolibro se descargó antes de que se guardaran '
+
+        const texto = document.createElement('p');
+        texto.textContent = 'Este audiolibro se descargó antes de que se guardaran '
             + 'los nombres de los capítulos, así que el índice va numerado.';
+
+        // Los nombres solo existen en la API de O'Reilly: los archivos se
+        // renombran al publicar y el audio no lleva etiquetas. Por eso esto
+        // necesita sesión válida, y lo dice si falla.
+        const boton = document.createElement('button');
+        boton.type = 'button';
+        boton.className = 'player-note-btn';
+        boton.textContent = 'Recuperar nombres de capítulos';
+        boton.onclick = async function () {
+            boton.disabled = true;
+            boton.textContent = 'Pidiendo los nombres...';
+            try {
+                const res = await fetch(API + '/api/library/chapter-names', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ folder: item.folder })
+                });
+                const out = await res.json();
+                if (out.error) throw new Error(out.error);
+                boton.textContent = 'Listo: ' + out.titled + ' capítulos';
+                // Se reabre para que el índice se pinte con los nombres nuevos
+                closePlayer();
+                openPlayer(item);
+            } catch (err) {
+                boton.disabled = false;
+                boton.textContent = 'Reintentar';
+                texto.textContent = 'No se pudieron recuperar: ' + err.message;
+            }
+        };
+
+        nota.append(texto, boton);
         list.insertAdjacentElement('beforebegin', nota);
     }
 
@@ -430,22 +462,30 @@ function renderPlayer(item, data) {
     // Si sabemos cuántos capítulos debería haber, tener menos en disco solo
     // puede significar que la descarga se cortó. Publicar eso en silencio es
     // como servir un libro truncado sin decirlo.
-    const expected = Number(data.expected_tracks) || 0;
-    if (expected && expected > tracks.length) {
-        warnIncomplete('Descarga incompleta: tienes ' + tracks.length + ' de '
-            + expected + ' capítulos. Descárgalo otra vez para completarlo.');
+    if (data.incomplete) {
+        const real = Number(data.audio_seconds) || 0;
+        const esperado = Number(data.duration_seconds) || 0;
+        const nEsperado = Number(data.expected_tracks) || 0;
+        let detalle;
+        if (nEsperado && nEsperado > tracks.length) {
+            detalle = 'tienes ' + tracks.length + ' de ' + nEsperado + ' capítulos';
+        } else if (real && esperado) {
+            detalle = 'tienes ' + formatClock(real) + ' de ' + formatClock(esperado)
+                + ' (' + Math.round(real / esperado * 100) + '%)';
+        } else {
+            detalle = 'faltan capítulos';
+        }
+        warnIncomplete('Descarga incompleta: ' + detalle
+            + '. Descárgalo otra vez para completarlo.');
     }
 
     // ---------- lógica
-    const durations = readStore(PLAYER_DUR_KEY)[item.folder] || {};
-
-    function paintDurations() {
-        rows.forEach(function (r) {
-            const d = durations[r.meta.n];
-            r.dur.textContent = d ? formatClock(d) : '';
-        });
-    }
-    paintDurations();
+    // Las duraciones las calcula el servidor leyendo la cabecera del MP4, así
+    // que están desde el primer pintado. Antes había que abrir las 29 pistas
+    // por HTTP solo para averiguarlas.
+    rows.forEach(function (r) {
+        r.dur.textContent = r.meta.seconds ? formatClock(r.meta.seconds) : '';
+    });
 
     function setActive(n) {
         rows.forEach(function (r) {
@@ -496,14 +536,6 @@ function renderPlayer(item, data) {
     });
 
     audio.addEventListener('loadedmetadata', function () {
-        const n = Number(playerView.dataset.track);
-        if (isFinite(audio.duration)) {
-            durations[n] = audio.duration;
-            const all = readStore(PLAYER_DUR_KEY);
-            all[item.folder] = durations;
-            writeStore(PLAYER_DUR_KEY, all);
-            paintDurations();
-        }
         tDur.textContent = formatClock(audio.duration);
     });
 
@@ -557,44 +589,6 @@ function renderPlayer(item, data) {
         playTrack(1, false);
     }
 
-    // Duraciones del resto del índice, una por una y en segundo plano. Usa las
-    // peticiones por rango del servidor, asi que baja solo la cabecera.
-    (async function fillDurations() {
-        for (const t of tracks) {
-            if (!playerView || durations[t.n]) continue;
-            const probe = new Audio();
-            probe.preload = 'metadata';
-            probe.src = API + t.url;
-            const ok = await new Promise(function (resolve) {
-                probe.addEventListener('loadedmetadata', function () { resolve(true); });
-                probe.addEventListener('error', function () { resolve(false); });
-                setTimeout(function () { resolve(false); }, 8000);
-            });
-            if (ok && isFinite(probe.duration)) {
-                durations[t.n] = probe.duration;
-                paintDurations();
-            }
-            probe.src = '';
-        }
-        const all = readStore(PLAYER_DUR_KEY);
-        all[item.folder] = durations;
-        writeStore(PLAYER_DUR_KEY, all);
-
-        // Los audiolibros bajados antes de que se guardara expected_tracks no
-        // tienen ese dato, pero sí la duración total que dice O'Reilly: comparar
-        // contra lo que suman las pistas delata igual una descarga cortada.
-        if (!playerView || expected) return;
-        const esperado = Number(data.duration_seconds) || 0;
-        const suma = Object.keys(durations).reduce(function (acc, k) {
-            return acc + (durations[k] || 0);
-        }, 0);
-        if (esperado && suma && suma < esperado * 0.9) {
-            warnIncomplete('Descarga incompleta: tienes ' + formatClock(suma)
-                + ' de ' + formatClock(esperado) + ' ('
-                + Math.round(suma / esperado * 100) + '%). '
-                + 'Descárgalo otra vez para completarlo.');
-        }
-    })();
 }
 
 
@@ -696,8 +690,11 @@ function libraryTile(item) {
     const formats = (item.formats && item.formats.length)
         ? item.formats
         : (isAudio ? ['audio'] : []);
-    const badges = (item.location === 'local'
-        ? '<span class="fmt-badge loc-local" title="Aún no está en Alexandría">LOCAL</span>'
+    // Un audiolibro a medias se ve desde la rejilla, sin tener que abrirlo.
+    const badges = (item.incomplete
+        ? '<span class="fmt-badge is-partial" title="La descarga quedó a medias">INCOMPLETO</span>'
+        : '') + (item.location === 'local'
+        ? '<span class="fmt-badge loc-local" title="Aún no está en la biblioteca">LOCAL</span>'
         : '') + formats.map(function (f) {
         return '<span class="fmt-badge fmt-' + f + '">' + f.toUpperCase() + '</span>';
     }).join('');
@@ -849,7 +846,8 @@ function goToSection(ct) {
     });
 
     setContentMode(ct);
-    if (ct === 'library') return;   // el visor local se pinta solo
+    // Las secciones locales se pintan solas, sin pasar por la API
+    if (ct === 'library' || ct === 'watchlist') return;
 
     // El orden solo existe para libros
     const sortWrap = document.getElementById('filter-sort');
@@ -865,14 +863,28 @@ function setContentMode(mode) {
     closePlayer();
 
     const isLibrary = mode === 'library';
+    const isWatchlist = mode === 'watchlist';
+    const isLocal = isLibrary || isWatchlist;   // secciones que no consultan la API
+
     document.getElementById('library-view').classList.toggle('is-open', isLibrary);
+    const wlView = document.getElementById('watchlist-view');
+    if (wlView) wlView.classList.toggle('is-open', isWatchlist);
     moveSearchInput(isLibrary);
 
-    // El buscador remoto y sus bloques de estado no aplican al visor local
+    // El buscador remoto y sus bloques de estado no aplican a las secciones
+    // locales
     ['results-bar', 'search-results', 'load-more-wrap', 'search-empty'].forEach(function (id) {
         const el = document.getElementById(id);
-        if (el) el.style.display = isLibrary ? 'none' : '';
+        if (el) el.style.display = isLocal ? 'none' : '';
     });
+
+    // "Para después" es una lista tuya, no una consulta: sin barra de búsqueda.
+    const toolbar = document.querySelector('.toolbar');
+    if (toolbar) toolbar.style.display = isWatchlist ? 'none' : '';
+
+    // El botón del menú se marca activo si estás en cualquiera de sus secciones
+    const menuBtn = document.getElementById('books-menu-btn');
+    if (menuBtn) menuBtn.classList.toggle('ct-active', isLocal);
 
     document.querySelectorAll('.ct-tab').forEach(function (t) {
         const on = t.dataset.ct === mode;
@@ -882,7 +894,7 @@ function setContentMode(mode) {
     });
 
     // Al volver del visor, el buscador recupera su estado propio
-    if (!isLibrary && !searchState.query) setSearchState('empty');
+    if (!isLocal && !searchState.query) setSearchState('empty');
 
     const input = document.getElementById('search-input');
     input.placeholder = isLibrary
@@ -890,6 +902,7 @@ function setContentMode(mode) {
         : 'Search by title, author, or ISBN...';
 
     if (isLibrary) loadLibrary();
+    if (isWatchlist && typeof loadWatchlist === 'function') loadWatchlist();
 }
 
 
@@ -1241,6 +1254,67 @@ document.addEventListener('visibilitychange', () => {
 });
 window.addEventListener('online', checkAuth);
 
+/* Convierte lo que hayas pegado en un objeto de cookies, o devuelve un error
+   que explique qué falta. Lo usan los DOS formularios —el de la cabecera y el
+   de la modal de descargas— para que se comporten igual.
+
+   Acepta las dos formas, porque cuál te sale depende de cómo copies:
+     - JSON:            {"orm-jwt": "...", "_abck": "..."}
+     - document.cookie: orm-jwt=...; _abck=...; bm_sz=...
+
+   Antes solo valía el JSON, y ahí está el problema real: copiar la salida del
+   inspector la trunca con facilidad, y entonces JSON.parse fallaba con
+   "Unexpected end of JSON input" sin decir por qué. La cadena cruda no se puede
+   truncar a medias sin que se note, y además se puede copiar de un tirón. */
+function parseCookieBlob(text) {
+    let raw = (text || '').trim();
+    if (!raw) return { error: 'Pega las cookies primero.' };
+
+    // El inspector copia con comillas alrededor y, si es JSON, con las de dentro
+    // escapadas. Se limpia, en vez de rechazarlo con un error incomprensible.
+    const entre = (a, b) => raw.startsWith(a) && raw.endsWith(b) && raw.length > 1;
+    if (entre('"', '"') || entre("'", "'")) {
+        raw = raw.slice(1, -1);
+        if (raw.indexOf('\\"') !== -1) raw = raw.replace(/\\"/g, '"');
+    }
+
+    let obj;
+    if (raw[0] === '{') {
+        try {
+            obj = JSON.parse(raw);
+        } catch (e) {
+            return { error: 'El JSON llegó incompleto o mal copiado (' + e.message
+                + '). Prueba pegando directamente el valor de document.cookie, '
+                + 'sin llaves ni comillas.' };
+        }
+        if (!obj || typeof obj !== 'object' || Array.isArray(obj)) {
+            return { error: 'Tiene que ser un objeto JSON, no una lista.' };
+        }
+    } else {
+        obj = {};
+        raw.split(';').forEach(function (par) {
+            const corte = par.indexOf('=');
+            if (corte < 1) return;
+            const clave = par.slice(0, corte).trim();
+            if (clave) obj[clave] = par.slice(corte + 1).trim();
+        });
+        if (!Object.keys(obj).length) {
+            return { error: 'No se reconoce nada ahí. Pega el JSON del snippet, '
+                + 'o el valor de document.cookie.' };
+        }
+    }
+
+    // La comprobación que faltaba: sin orm-jwt no hay sesión, y guardarlas era
+    // un "éxito" que luego fallaba en la primera descarga.
+    if (!obj['orm-jwt']) {
+        const n = Object.keys(obj).length;
+        return { error: 'Llegaron ' + n + ' cookies pero ninguna es orm-jwt, que '
+            + 'es la de la sesión. Cópialas de nuevo desde una pestaña de '
+            + 'learning.oreilly.com con la sesión abierta.' };
+    }
+    return { cookies: obj };
+}
+
 function showCookieModal() {
     document.getElementById('cookie-modal').classList.remove('hidden');
     document.getElementById('cookie-input').value = '';
@@ -1254,26 +1328,16 @@ function hideCookieModal() {
 }
 
 async function saveCookies() {
-    const input = document.getElementById('cookie-input').value.trim();
+    const input = document.getElementById('cookie-input').value;
     const errorEl = document.getElementById('cookie-error');
 
-    if (!input) {
-        errorEl.textContent = 'Please paste your cookie JSON';
+    const leido = parseCookieBlob(input);
+    if (leido.error) {
+        errorEl.textContent = leido.error;
         errorEl.classList.remove('hidden');
         return;
     }
-
-    let cookies;
-    try {
-        cookies = JSON.parse(input);
-        if (typeof cookies !== 'object' || Array.isArray(cookies)) {
-            throw new Error('Must be a JSON object');
-        }
-    } catch (e) {
-        errorEl.textContent = 'Invalid JSON format: ' + e.message;
-        errorEl.classList.remove('hidden');
-        return;
-    }
+    const cookies = leido.cookies;
 
     try {
         const res = await fetch(`${API}/api/cookies`, {
@@ -1402,6 +1466,10 @@ function renderBookCard(book, container) {
     div.innerHTML = createBookCardHTML(book);
     setupBookCardEvents(div, book);
     container.appendChild(div);
+    // El modo múltiple necesita saber qué libros hay en pantalla y volver a
+    // poner su checkbox cuando la lista se repinta (buscar, cargar más).
+    if (typeof batchRegisterCard === 'function') batchRegisterCard(div, book);
+    if (typeof watchlistDecorateCard === 'function') watchlistDecorateCard(div, book);
 }
 
 function updateResultsBar() {
@@ -1627,7 +1695,7 @@ function createBookCardHTML(book) {
                             <span class="pages-label text-zinc-400">Pages:</span>
                             <span class="pages-value text-zinc-500 animate-pulse-subtle">Loading...</span>
                         </p>
-                        <div class="book-description text-sm text-zinc-600 leading-relaxed max-h-20 overflow-y-auto pr-2 animate-pulse-subtle">
+                        <div class="book-description text-sm text-zinc-600 leading-relaxed max-h-52 overflow-y-auto pr-2 animate-pulse-subtle">
                             Loading description...
                         </div>
                     </div>
@@ -2277,9 +2345,14 @@ async function download(cardElement) {
     // Lock the UI to this card until the download/translation finishes.
     setDownloadLock(true);
 
+    // El titulo va en la peticion para que la cola pueda mostrarlo: sin el,
+    // la modal de progreso ensena el ISBN.
+    const tituloEl = cardElement.querySelector('.tile-title');
+    const titulo = tituloEl ? tituloEl.textContent.trim() : '';
+
     const requestBody = isAudio
-        ? { book_id: bookId, content_type: 'audiobook' }
-        : { book_id: bookId, format: finalFormat };
+        ? { book_id: bookId, title: titulo, content_type: 'audiobook' }
+        : { book_id: bookId, title: titulo, format: finalFormat };
     if (selectedChapters !== null) {
         requestBody.chapters = selectedChapters;
     }
@@ -2578,8 +2651,66 @@ async function browseLibraryDir() {
     browseBtn.textContent = 'Examinar';
 }
 
+/* Confirmacion en linea dentro del modal. Se resuelve con la eleccion del
+   usuario, para poder esperarla desde saveLibraryDir sin un dialogo del sistema. */
+function confirmLibraryChange(total, actual) {
+    return new Promise(function (resolve) {
+        const host = document.getElementById('settings-library-state');
+        host.classList.remove('hidden');
+        host.className = 'settings-confirm';
+        host.innerHTML = '';
+
+        const texto = document.createElement('p');
+        texto.textContent = 'Tu biblioteca actual tiene ' + total
+            + (total === 1 ? ' obra en ' : ' obras en ') + actual
+            + '. Cambiar de carpeta NO las mueve: se quedan donde están y la '
+            + 'nueva empieza vacía.';
+
+        const fila = document.createElement('div');
+        fila.className = 'settings-confirm-row';
+
+        const cancelar = document.createElement('button');
+        cancelar.type = 'button';
+        cancelar.className = 'settings-confirm-btn';
+        cancelar.textContent = 'Cancelar';
+
+        const seguir = document.createElement('button');
+        seguir.type = 'button';
+        seguir.className = 'settings-confirm-btn is-danger';
+        seguir.textContent = 'Cambiar de todos modos';
+
+        function cerrar(valor) {
+            host.innerHTML = '';
+            host.className = 'hidden';
+            renderSettings();
+            resolve(valor);
+        }
+        cancelar.onclick = function () { cerrar(false); };
+        seguir.onclick = function () { cerrar(true); };
+
+        fila.append(cancelar, seguir);
+        host.append(texto, fila);
+    });
+}
+
 async function saveLibraryDir(path) {
     const state = document.getElementById('settings-library-state');
+
+    // Mover la biblioteca de sitio es una decision con consecuencias, asi que
+    // se dice cuantas obras se quedan atras ANTES de tocar el ajuste.
+    try {
+        const res = await fetch(`${API}/api/library`);
+        const data = await res.json();
+        const total = data.total || 0;
+        if (total > 0 && String(path || '') !== librarySettings.dir) {
+            const seguir = await confirmLibraryChange(total, librarySettings.dir);
+            if (!seguir) return;
+        }
+    } catch (err) {
+        // Si no se puede contar, se sigue: el aviso es una cortesia, no un
+        // requisito, y bloquear el ajuste por eso seria peor.
+    }
+
     try {
         const res = await fetch(`${API}/api/settings/library-dir`, {
             method: 'POST',
@@ -2679,27 +2810,54 @@ document.addEventListener('DOMContentLoaded', () => {
     if (homeLink) {
         homeLink.onclick = () => {
             if (downloadInProgress) return;
+            // El logo es "empezar de cero". Sin limpiar la consulta,
+            // goToSection('book') relanzaba la última búsqueda aunque el input
+            // se viera vacío.
+            searchState.query = '';
+            searchState.page = 0;
+            const input = document.getElementById('search-input');
+            if (input) input.value = '';
             goToSection('book');
         };
     }
 
+    // --- menú "Mis libros" ---
+    const booksBtn = document.getElementById('books-menu-btn');
+    const booksMenu = document.getElementById('books-menu');
+
+    function closeBooksMenu() {
+        if (!booksMenu) return;
+        booksMenu.classList.add('hidden');
+        if (booksBtn) booksBtn.setAttribute('aria-expanded', 'false');
+    }
+
+    if (booksBtn && booksMenu) {
+        booksBtn.addEventListener('click', function (e) {
+            e.stopPropagation();
+            const abierto = booksMenu.classList.toggle('hidden');
+            booksBtn.setAttribute('aria-expanded', String(!abierto));
+        });
+        document.addEventListener('click', closeBooksMenu);
+        document.addEventListener('keydown', function (e) {
+            if (e.key === 'Escape') closeBooksMenu();
+        });
+    }
+
     document.querySelectorAll('.ct-tab').forEach(tab => {
-        tab.addEventListener('click', () => {
+        tab.addEventListener('click', (e) => {
             if (downloadInProgress) return;
-            let ct = tab.dataset.ct;
-            // Desde el reproductor, "Mi biblioteca" significa volver a la
-            // rejilla, no alternar a Libros. Sin esto te sacaba de la
-            // biblioteca y aterrizabas en una búsqueda vacía, que se veía
-            // igual que si la biblioteca estuviera vacía.
+            e.stopPropagation();
+            const ct = tab.dataset.ct;
+            closeBooksMenu();
+
+            // Desde el reproductor, elegir "Biblioteca" es volver a la rejilla.
             if (ct === 'library' && playerView) {
                 closePlayer();
                 return;
             }
-            // "Mi biblioteca" alterna: pulsarlo estando activo vuelve a Libros
-            if (ct === searchState.contentType) {
-                if (ct !== 'library') return;
-                ct = 'book';
-            }
+            // Las entradas del menú ya no alternan: ir a una sección lleva a esa
+            // sección y punto. Para volver al inicio está el logo, que es lo que
+            // hacía falta cuando ese comportamiento se inventó.
             goToSection(ct);
         });
     });

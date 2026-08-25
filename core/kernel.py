@@ -37,6 +37,8 @@ def create_default_kernel() -> Kernel:
         AudiobookPlugin,
         LibraryPlugin,
         OutputPlugin,
+        QueuePlugin,
+        WatchlistPlugin,
         SystemPlugin,
         DownloaderPlugin,
     )
@@ -65,6 +67,8 @@ def create_default_kernel() -> Kernel:
 
     # Orchestration & system plugins
     kernel.register("output", OutputPlugin())
+    kernel.register("queue", QueuePlugin())
+    kernel.register("watchlist", WatchlistPlugin())
     kernel.register("system", SystemPlugin())
     kernel.register("downloader", DownloaderPlugin())
 
