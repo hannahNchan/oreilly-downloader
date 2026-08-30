@@ -1,0 +1,10 @@
+# This service has its own venv, separate from the app's.
+.venv/
+__pycache__/
+*.pyc
+*.log
+
+# The model lives on D: (see app/config.py), outside the repo, so there is
+# nothing here to ignore for it. Only the HF staging cache, if anyone points
+# HF_HOME at this folder instead of D:.
+.hf-cache/

@@ -5,6 +5,12 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>O'Reilly Ingest</title>
 
+    <!-- SVG primero para navegadores que lo entienden (escala a cualquier
+         tamano); el .ico queda de respaldo y de paso evita el 404 de los
+         que piden /favicon.ico sin mirar el <link>. -->
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+    <link rel="alternate icon" type="image/x-icon" href="/favicon.ico">
+
     <!-- Fonts: Editorial pairing -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -347,6 +353,26 @@
     </div>
 
     <!-- Ajustes globales -->
+    <!-- Progreso de un bundle: dos descargas a la vez, asi que la modal del
+         libro no sirve. Se lee de /api/queue filtrando por bundle_id. -->
+    <div id="bundle-modal" class="hidden fixed inset-0 z-50 overflow-y-auto" role="dialog" aria-modal="true" aria-labelledby="bundle-modal-title">
+        <div class="fixed inset-0 bg-black/40" id="bundle-modal-backdrop"></div>
+        <div class="relative min-h-full flex items-center justify-center p-4">
+            <div class="relative bg-white rounded-xl shadow-xl w-full max-w-lg p-6">
+                <h3 id="bundle-modal-title" class="text-lg font-semibold text-zinc-800">Bundle</h3>
+                <p id="bundle-modal-sub" class="text-sm text-zinc-500 mt-1"></p>
+
+                <div id="bundle-modal-rows" class="mt-5 space-y-5"></div>
+
+                <p id="bundle-modal-path" class="mt-5 text-xs text-zinc-400 break-all"></p>
+
+                <div class="mt-6 flex justify-end">
+                    <button id="bundle-modal-close" class="px-4 py-2 text-zinc-600 hover:bg-zinc-100 rounded-lg font-medium transition-colors duration-150">Cerrar</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <div id="settings-modal" class="hidden fixed inset-0 z-50 overflow-y-auto" role="dialog" aria-modal="true" aria-labelledby="settings-title">
         <div class="min-h-screen px-4 flex items-center justify-center">
             <div class="fixed inset-0 bg-zinc-900/60 backdrop-blur-sm transition-opacity" data-close-settings></div>

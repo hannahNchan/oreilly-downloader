@@ -2,9 +2,12 @@
 
 import html
 import re
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
+import config
 from utils.files import sanitize_filename
 
 from .base import Plugin
@@ -69,28 +72,95 @@ def _patch_macos_homebrew_dylib_loading():
     cffi.FFI.dlopen = dlopen
 
 
+# Un encabezado propio del capitulo. Se miran h1 y h2 porque no todos los
+# libros usan el mismo nivel. Sin escapes en el patron a proposito: la clase
+_HEADING_RE = re.compile(r"<h[12][ >/]", re.IGNORECASE)  # cubre <h1>, <h1 c=.., <h1/>
+
+
 class PdfPlugin(Plugin):
     """Generates PDF from downloaded book content using WeasyPrint."""
 
     def __init__(self):
-        self._weasyprint = None
+        self._library = None       # modulo weasyprint, o False si no carga
+        self._binary = None        # ruta al exe autonomo, o False si no hay
 
-    @property
-    def weasyprint(self):
-        """Lazy import WeasyPrint to avoid import errors if not installed."""
-        if self._weasyprint is None:
+    # --- backends ---------------------------------------------------------
+
+    def library(self):
+        """El modulo weasyprint, o None si su stack nativo no carga.
+
+        Devuelve None en vez de lanzar, y cachea tambien el fallo: generar por
+        capitulos entra aqui una vez por capitulo, y reintentar un import que
+        ya sabemos roto costaria el mismo error decenas de veces.
+        """
+        if self._library is None:
             try:
                 _patch_macos_homebrew_dylib_loading()
                 import weasyprint
-                self._weasyprint = weasyprint
-            except ImportError as e:
-                raise ImportError(
-                    "WeasyPrint is required for PDF generation. "
-                    "Install with: pip install weasyprint\n"
-                    "System dependencies (macOS): brew install pango\n"
-                    "System dependencies (Ubuntu): apt install libpango-1.0-0 libharfbuzz0b libpangoft2-1.0-0"
-                ) from e
-        return self._weasyprint
+                self._library = weasyprint
+            except Exception:
+                # No solo ImportError: en Windows sin GTK esto sale como
+                # OSError desde cffi al no encontrar libgobject.
+                self._library = False
+        return self._library or None
+
+    def binary(self):
+        """El weasyprint.exe autonomo, o None.
+
+        Trae Pango, Cairo y GObject empaquetados DENTRO del ejecutable, que en
+        Windows es la unica forma de usarlos sin instalar GTK: al ir dentro del
+        binario no hay carpeta de DLL a la que apuntar.
+        """
+        if self._binary is None:
+            candidate = Path(config.WEASYPRINT_BIN)
+            if candidate.is_file():
+                self._binary = candidate
+            else:
+                found = shutil.which("weasyprint")
+                self._binary = Path(found) if found else False
+        return self._binary or None
+
+    def _write_pdf(self, html_content: str, base_dir: Path, pdf_path: Path) -> None:
+        """Renderiza un HTML a PDF con el backend que haya disponible.
+
+        Los dos caminos son equivalentes por construccion: HTML(string=...,
+        base_url=...) se traduce a stdin mas -u, asi que ambos ven los mismos
+        bytes y resuelven las rutas relativas contra la misma carpeta. Sin
+        archivos temporales.
+        """
+        pdf_path.parent.mkdir(parents=True, exist_ok=True)
+
+        module = self.library()
+        if module is not None:
+            module.HTML(string=html_content, base_url=str(base_dir)).write_pdf(
+                str(pdf_path)
+            )
+            return
+
+        binary = self.binary()
+        if binary is None:
+            raise RuntimeError(
+                "No hay forma de generar PDF. El modulo weasyprint no carga "
+                "(en Windows necesita GTK, que no viene instalado) y tampoco "
+                f"esta el binario autonomo en {config.WEASYPRINT_BIN}. Copia "
+                "ahi weasyprint.exe, instala GTK, o define WEASYPRINT_BIN."
+            )
+
+        # Sin ventana de consola: generar por capitulos entra aqui una vez por
+        # capitulo, y cada llamada abriria y cerraria un cmd en la cara.
+        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        completed = subprocess.run(
+            [str(binary), "-", str(pdf_path), "-u", str(base_dir), "-q"],
+            input=html_content.encode("utf-8"),
+            capture_output=True,
+            creationflags=flags,
+        )
+        if completed.returncode != 0 or not pdf_path.is_file():
+            detail = (completed.stderr or b"").decode("utf-8", "replace").strip()
+            raise RuntimeError(
+                f"weasyprint.exe fallo (codigo {completed.returncode}): "
+                f"{detail[:400] or 'sin mensaje'}"
+            )
 
     def generate(
         self,
@@ -131,11 +201,7 @@ class PdfPlugin(Plugin):
         safe_title = sanitize_filename(title)
         pdf_path = output_dir / f"{safe_title}.pdf"
 
-        html_doc = self.weasyprint.HTML(
-            string=html_content,
-            base_url=str(oebps),
-        )
-        html_doc.write_pdf(str(pdf_path))
+        self._write_pdf(html_content, oebps, pdf_path)
 
         return pdf_path
 
@@ -198,11 +264,7 @@ class PdfPlugin(Plugin):
             pdf_filename = f"{i+1:03d}_{safe_title}.pdf"
             pdf_path = pdf_dir / pdf_filename
 
-            html_doc = self.weasyprint.HTML(
-                string=chapter_html,
-                base_url=str(oebps),
-            )
-            html_doc.write_pdf(str(pdf_path))
+            self._write_pdf(chapter_html, oebps, pdf_path)
             pdf_paths.append(pdf_path)
 
         return pdf_paths
@@ -220,9 +282,20 @@ class PdfPlugin(Plugin):
         print_css = self._get_print_css()
         original_css = self._load_css_files(oebps, css_files)
 
-        cover_html = self._generate_cover_html(book_info, cover_image)
+        # Un <img> a un archivo que no existe no falla: WeasyPrint pinta el
+        # texto alternativo, y la portada acaba siendo la palabra "Cover" sobre
+        # una pagina en blanco. Pasa cuando el catalogo no trae cover_url, que
+        # es habitual en las ediciones en espanol.
+        if cover_image and not (oebps / "Images" / cover_image).is_file():
+            cover_image = None
+
         toc_html = self._generate_toc_html(toc, chapters)
 
+        # La portada propia del libro (cover.xhtml) llega como capitulo 0, asi
+        # que iba a parar DETRAS del indice. Se separa para ponerla delante. Y
+        # cuando existe se prefiere a la generada, porque sale de los assets del
+        # epub y funciona aunque el catalogo no tenga metadatos.
+        book_cover_parts = []
         chapters_html_parts = []
 
         for chapter in chapters:
@@ -234,13 +307,35 @@ class PdfPlugin(Plugin):
             chapter_id = Path(chapter["filename"]).stem
             chapter_title = self._escape_html(chapter.get("title", ""))
 
-            chapters_html_parts.append(f'''
-    <section class="chapter" id="{chapter_id}">
-        <h1 class="chapter-title">{chapter_title}</h1>
+            if chapter_id.lower() == "cover":
+                # Clase propia: esta portada es una imagen a pagina completa,
+                # mientras que la generada lleva titulo y autor debajo. Con las
+                # mismas reglas la imagen salia encogida y desplazada.
+                book_cover_parts.append(f"""
+    <section class="book-cover" id="{chapter_id}">
         {body}
-    </section>''')
+    </section>""")
+                continue
 
-        chapters_html = "\n".join(chapters_html_parts)
+            # El capitulo casi siempre trae ya su propio encabezado, asi que
+            # inyectar el nuestro imprimia el titulo dos veces seguidas. No se
+            # puede quitar sin mas: de este h1 cuelgan los marcadores del PDF
+            # (bookmark-level), asi que cuando sobra se colapsa en vez de
+            # borrarse, y el indice lateral sigue funcionando.
+            duplicated = bool(_HEADING_RE.search(body))
+            title_class = "chapter-title is-duplicate" if duplicated else "chapter-title"
+            chapters_html_parts.append(f"""
+    <section class="chapter" id="{chapter_id}">
+        <h1 class="{title_class}">{chapter_title}</h1>
+        {body}
+    </section>""")
+
+        if book_cover_parts:
+            cover_html = "".join(book_cover_parts)
+        else:
+            cover_html = self._generate_cover_html(book_info, cover_image)
+
+        chapters_html = "".join(chapters_html_parts)
         title = self._escape_html(book_info.get("title", "Untitled"))
 
         return f'''<!DOCTYPE html>
@@ -376,6 +471,31 @@ class PdfPlugin(Plugin):
     padding-top: 2in;
 }
 .cover-page img { max-width: 100%; max-height: 6in; }
+/* La portada propia del libro ocupa la pagina entera. Letter con margenes de
+   1in arriba y abajo deja 9in utiles; sin esto heredaba el max-height de 6in
+   y el padding de 2in de la portada generada, y salia pequena y hundida. */
+.book-cover {
+    page-break-after: always;
+    text-align: center;
+    padding: 0;
+    margin: 0;
+}
+.book-cover img {
+    max-width: 100%;
+    max-height: 9in;
+    width: auto;
+    height: auto;
+}
+/* Titulo de capitulo redundante: invisible, pero sigue generando caja para que
+   bookmark-level lo recoja en el indice del PDF. display:none lo borraria. */
+.chapter-title.is-duplicate {
+    font-size: 0;
+    line-height: 0;
+    height: 0;
+    margin: 0;
+    color: transparent;
+    overflow: hidden;
+}
 .cover-page h1 { font-size: 24pt; margin-top: 1in; }
 .cover-page .authors { font-size: 14pt; color: #333; margin-top: 0.5in; }
 .toc-page { page-break-after: always; }

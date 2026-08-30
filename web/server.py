@@ -61,6 +61,9 @@ class DownloaderHandler(SimpleHTTPRequestHandler):
             self._handle_audiobook_info(match.group(1))
         elif match := re.match(r"/api/book/([^/]+)/chapters$", path):
             self._handle_chapters_list(match.group(1))
+        elif match := re.match(r"/api/book/([^/]+)/editions$", path):
+            language = (parse_qs(parsed.query).get("language", ["es"])[0] or "es").strip()
+            self._handle_editions(match.group(1), language)
         elif match := re.match(r"/api/book/([^/]+)$", path):
             self._handle_book_info(match.group(1))
         elif path == "/api/progress":
@@ -583,10 +586,43 @@ class DownloaderHandler(SimpleHTTPRequestHandler):
             # Si esta configurada pero no responde, el visor lo dice en vez de
             # dar a entender que no tienes nada publicado.
             payload["library_available"] = self.kernel["library"].root() is not None
+            self._tag_bundles(payload.get("items") or [])
             self._send_json(payload)
         except Exception as e:
             traceback.print_exc()
             self._send_json({"error": str(e)}, 500)
+
+    def _tag_bundles(self, items: list) -> None:
+        """Mark the library works that came from a bundle.
+
+        Read from the manifests on disk instead of stamping the fact onto each
+        work: the bundle already describes itself in output/bundles, and
+        copying that into every work's metadata would give it two places to
+        disagree with itself.
+        """
+        try:
+            manifests = self.kernel["bundle"].list_all()
+        except Exception:  # noqa: BLE001
+            return
+        if not manifests:
+            return
+
+        index = {}
+        for manifest in manifests:
+            for language, entry in (manifest.get("languages") or {}).items():
+                book_id = str(entry.get("book_id") or "")
+                if book_id:
+                    index[book_id] = {
+                        "bundle_id": manifest.get("bundle_id"),
+                        "bundle_lang": language,
+                        "bundle_title": manifest.get("title"),
+                        "bundle_complete": bool(manifest.get("complete")),
+                    }
+
+        for item in items:
+            info = index.get(str(item.get("book_id") or ""))
+            if info:
+                item.update(info)
 
     def _handle_watchlist_add(self, data: dict):
         """Guarda un titulo para descargarlo mas tarde.
@@ -867,6 +903,99 @@ class DownloaderHandler(SimpleHTTPRequestHandler):
         else:
             self._send_json({"error": "Failed to reveal file"}, 500)
 
+    def _handle_editions(self, book_id: str, language: str = "es"):
+        """Is there an edition of this book in `language`?
+
+        Answers with a score and the matched title, never a bare yes: pairing
+        editions is a guess (O'Reilly gives each its own ISBN and no link
+        between them), and only the person reading both titles can tell whether
+        the guess is right.
+        """
+        try:
+            result = self.kernel["editions"].counterpart(book_id, language)
+        except Exception as exc:  # noqa: BLE001
+            self._send_json({"error": f"{type(exc).__name__}: {exc}"}, 502)
+            return
+
+        # Que falta ya en disco, para no volver a generar lo que esta bien.
+        if result.get("found") and result.get("candidate"):
+            try:
+                bundle = self.kernel["bundle"]
+                plan = bundle.plan(result.get("source") or {}, result["candidate"])
+                gap = bundle.gap(plan["bundle_id"],
+                                 [spec["lang"] for spec in plan["jobs"]])
+                gap["bundle_id"] = plan["bundle_id"]
+                result["bundle"] = gap
+            except Exception:  # noqa: BLE001
+                pass  # sin esto el checkbox sigue sirviendo, solo sin detalle
+
+        self._send_json(result)
+
+    def _handle_bundle_download(self, book_id: str, data: dict, transfer: bool):
+        """Queue both editions of a book as one bundle."""
+        from plugins.bundle import BUNDLE_FORMATS
+
+        language = (data.get("bundle_language") or "es").strip().lower()
+        match = self.kernel["editions"].counterpart(book_id, language)
+
+        if not match.get("found") or not match.get("candidate"):
+            self._send_json(
+                {"error": f"No hay edicion en '{language}' para este libro",
+                 "reason": match.get("reason", "")},
+                409,
+            )
+            return
+
+        source = match.get("source") or {
+            "id": book_id, "title": data.get("title") or book_id, "language": "en",
+        }
+        candidate = match["candidate"]
+
+        bundle = self.kernel["bundle"]
+        plan = bundle.plan(source, candidate)
+        bundle.start(plan, source, candidate)
+
+        # Solo lo que falta. Aviso honesto: esto NO acorta la descarga de
+        # capitulos -- el pipeline los necesita para generar cualquier formato.
+        # Lo que evita es regenerar y pisar los cuatro que ya estan bien.
+        gap = bundle.gap(plan["bundle_id"], [s["lang"] for s in plan["jobs"]])
+
+        jobs = []
+        skipped = []
+        for spec in plan["jobs"]:
+            if not spec["book_id"]:
+                continue
+            needed = gap["missing"].get(spec["lang"]) or []
+            if not needed:
+                skipped.append({"language": spec["lang"], "title": spec["title"]})
+                continue
+            job = self.kernel["queue"].enqueue(
+                book_id=spec["book_id"],
+                title=spec["title"],
+                content_type="book",
+                formats=list(needed),
+                # A bundle promises every format with images, and the whole
+                # book: a chapter selection would not even mean the same thing
+                # in the other edition.
+                skip_images=False,
+                chapters=None,
+                transfer=transfer,
+                bundle_id=plan["bundle_id"],
+                bundle_lang=spec["lang"],
+            )
+            jobs.append({
+                "job_id": job.id, "book_id": spec["book_id"],
+                "language": spec["lang"], "title": spec["title"],
+                "formats": list(needed), "job_status": job.status,
+            })
+
+        self._send_json({
+            "status": "queued" if jobs else "complete", "bundle": True,
+            "bundle_id": plan["bundle_id"], "dir": plan["dir"],
+            "score": match.get("score"), "jobs": jobs,
+            "skipped": skipped, "gap": gap,
+        })
+
     def _handle_download(self, data: dict):
         """Start a book download."""
         book_id = data.get("book_id")
@@ -943,6 +1072,12 @@ class DownloaderHandler(SimpleHTTPRequestHandler):
         # Parse formats using plugin (single source of truth)
         from plugins.downloader import DownloaderPlugin
         formats = DownloaderPlugin.parse_formats(output_format)
+
+        # Un bundle no es un formato mas: son dos descargas emparejadas, asi
+        # que se despacha antes de encolar la normal.
+        if data.get("bundle"):
+            self._handle_bundle_download(book_id, data, transfer)
+            return
 
         # A la cola. Ya no se rechaza la segunda descarga: se pone detras.
         job = self.kernel["queue"].enqueue(

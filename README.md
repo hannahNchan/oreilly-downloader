@@ -29,7 +29,7 @@ Inspired by [safaribooks](https://github.com/lorenzodifuccia/safaribooks) by [@l
 - **Download queue** - queue many books, one at a time, pause and resume
 - **Built-in library** - read your EPUBs in the browser, no external reader
 - **"Para después" list** - save titles now, download them later
-- **Translation with a local LLM** *(beta)* - translate while downloading, via Ollama
+- **Translation with a local model** *(beta)* - translate while downloading, on your own GPU
 
 <img src="docs/main.png" alt="Main Page">
 
@@ -127,72 +127,115 @@ Point it anywhere you like, including a network share — downloads still go
 through the local cache first and are transferred on completion, verified byte
 for byte.
 
-## Translation (local LLM)
+## Translation (local model)
 
-> **BETA.** It works, but expect rough edges: a full book takes hours, the
-> output is not proofread, and quality depends heavily on the model you pick.
-> Treat the result as a draft, not a finished translation.
+> **BETA.** The output is not proofread. Treat it as a draft, not a finished
+> translation.
 
 Chapters are translated by a model running on your own machine, as part of the
 download. Nothing is sent to a third-party service and no API key is involved.
 
+The engine is **NLLB-200-3.3B**, Meta's dedicated translation model, on
+CTranslate2 in int8. It is an encoder-decoder translation model, not a
+general-purpose chat model: it has no system prompt, so it cannot refuse,
+comment or add a preamble. Text in, translated text out - which removes every
+line of output validation an instruction-following model would need.
+
+It runs as its own service under [`services/translator`](services/translator),
+with its own venv, because CUDA has nothing to do with this app's dependencies
+and the app has to keep starting on a machine without a GPU.
+
 ### Setup
 
-Install [Ollama](https://ollama.com), pull a model, and leave it running:
-
-```bash
-ollama pull qwen3.5:9b
+```powershell
+cd services	ranslator
+.\setup.ps1
 ```
 
-Then pick a language under **Translate (local LLM)** in the download modal.
-`Original (no translation)` is the default, so nothing changes until you ask for
-it. If Ollama isn't reachable the download fails immediately instead of quietly
-giving you an untranslated book.
+Then start it and leave it running:
 
-### Choosing a model
+```powershell
+.
+un.ps1
+```
 
-A model that fits entirely in VRAM beats a bigger one that spills to CPU. On the
-same chapter, `qwen3.5:9b` (~6.6 GB) measured roughly **3x faster** than
-`qwen3-coder:30b` (18.6 GB, offloaded) — and coder-tuned models are worse at
-prose than general ones. Very small models are a false economy: sub-7B ones
-mangled short fragments, returning a whole paragraph where the source had two
-words.
+Pick a language under **Translate** in the download modal. `Original (no
+translation)` is the default, so nothing changes until you ask for it. If the
+service is not answering with a loaded model, the download fails immediately
+instead of quietly handing you an untranslated book.
+
+The VRAM budget, the batch-size table and what to do when CUDA is not visible
+are all in [`services/translator/README.md`](services/translator/README.md).
 
 ### Configuration
 
-All of it lives in `config.py`:
+The app side lives in `config.py`:
 
 | Setting | Default | What it does |
 |---------|---------|--------------|
-| `OLLAMA_URL` | `http://localhost:11434` | Where Ollama listens |
-| `OLLAMA_MODEL` | `qwen3.5:9b` | Model used to translate |
-| `OLLAMA_NUM_CTX` | `16384` | Context window. **Don't lower this** — Ollama's 4096 default silently truncates the reply, and whole passages come back untranslated |
-| `OLLAMA_DISABLE_THINKING` | `True` | Skips the "reasoning" pass, which is wasted time here. Models that reject the flag are retried without it |
-| `TRANSLATE_BATCH_CHARS` | `4000` | Characters per request. Fewer round-trips is much faster |
-| `TRANSLATE_TIMEOUT` | `300` | Seconds allowed per request |
-| `TRANSLATE_LANGUAGES` | `es-LATAM` | Target languages, as `code -> instruction for the model`. Add your own here |
+| `TRANSLATOR_URL` | `http://127.0.0.1:8100` | Where the service listens |
+| `TRANSLATE_REQUEST_CHARS` | `150000` | Characters per request to the service |
+| `TRANSLATE_REQUEST_ITEMS` | `500` | Blocks per request |
+| `TRANSLATE_TIMEOUT` | `600` | Seconds allowed per request |
+| `TRANSLATE_LANGUAGES` | `es-LATAM` | Target languages offered in the UI |
+| `NLLB_TARGET_LANGS` | `es-LATAM -> spa_Latn` | FLORES-200 tag per language. NLLB does not speak ISO-639: `es` means nothing to it, `spa_Latn` does |
 
-### What it will and won't touch
+Decoding (beam size, batch tokens, VRAM guards) belongs to the service and lives
+in `services/translator/app/config.py`.
 
-- **Code is never translated.** `pre`, `code`, `kbd`, `samp`, `var`, `tt`,
-  `script` and `style` are left exactly as they came.
-- Text is translated **per block** — paragraph, list item, heading, table cell —
-  not per text node. A sentence broken up by `<em>` or `<code>` reaches the model
-  as one sentence, which is the difference between a translation and word salad.
-- Every result is validated before being accepted: if the returned markup lost a
-  tag or dropped the contents of a `<code>`, the original block is kept.
-- Batches that come back with entries missing are retried in halves, so one bad
-  response doesn't cost you a chapter.
+### How the markup survives
+
+The model cannot be told anything, so the tags are taken out of its way and put
+back afterwards. Each block becomes a template where every piece of markup is a
+numeric placeholder:
+
+```
+<p>The <code>pd.Series</code> class is a <i>blueprint</i>.</p>
+  becomes
+"The %%0%% class is a %%1%%blueprint%%2%%."
+```
+
+The model sees the whole sentence - which is what it needs to get Spanish word
+order right - and carries the placeholders along with the words they belong to.
+
+- **Code is never translated, and cannot be.** `pre`, `code`, `kbd`, `samp`,
+  `var`, `tt`, `script`, `style`, images, `svg` and MathML never reach the model
+  at all: they sit in a placeholder and come back verbatim. There is nothing to
+  verify afterwards, because there was never an opportunity to corrupt them.
+- Text is translated **per block** - paragraph, list item, heading, table cell,
+  and any `div` holding only inline content - never per text node. A sentence
+  broken up by `<em>` or `<code>` reaches the model as one sentence, which is the
+  difference between a translation and word salad.
+- **Losses are graded, not fatal.** A placeholder can come back missing with the
+  text around it translated perfectly. It is not common on real chapter markup -
+  a 13-block sample carrying 18 placeholders lost one formatting pair and no
+  protected content - but it happens, and it does not scale with how many
+  placeholders a sentence holds. So they are classified. Losing a
+  `<code>` placeholder would delete content, so that block is rejected and
+  retried with inline formatting flattened, which leaves far fewer placeholders
+  to lose. Losing an `<i>` costs only italics, so the translation is kept and the
+  formatting is dropped - a Spanish paragraph without italics beats an English
+  one with them. Only a block that loses its code twice keeps its English.
+- Attributes are restored from the original element and never sent, so an `href`
+  cannot come back corrupted.
 
 ### Known limits
 
-- **Slow.** Hours for a full book on consumer hardware. The download itself takes
-  minutes; the translation is everything after that.
+- **`<i>` and `<b>` inside a sentence may not survive.** See above: the
+  translation is kept, the emphasis is not. Links always keep their text and
+  sometimes lose the link.
+- **No glossary yet.** The model cannot be told "keep identifiers in English", so
+  it translates *string*, *array* and *commit* as ordinary words. Protecting them
+  needs a term list running through the same placeholder mechanism.
+- **One Spanish.** FLORES-200 has a single `spa_Latn`; there is no es-419 and no
+  prompt to ask for neutral Latin American Spanish. That is produced by a
+  deterministic post-edition list in the service
+  (`services/translator/data/postedit_spa_Latn.txt`), which you can edit.
 - **Your O'Reilly session may be shorter than the job.** Chapters are all fetched
   first and translated afterwards, so the session only has to survive the
   download phase. If it does expire mid-download you get an explicit error, not a
-  silently truncated book — paste fresh cookies and run it again.
-- Only `es-LATAM` (neutral Latin American Spanish) ships configured.
+  silently truncated book - paste fresh cookies and run it again.
+- Only `es-LATAM` ships configured.
 
 ## Architecture
 

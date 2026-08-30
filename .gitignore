@@ -40,3 +40,6 @@ cookies.json
 .pytest_cache/
 htmlcov/
 .venv-cookies/
+
+# Binario autonomo de WeasyPrint: 29 MB, no va al repo.
+tools/
