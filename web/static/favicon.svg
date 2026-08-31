@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-label="O'Reilly Ingest">
+  <!-- Glifo de descarga sobre el rojo de la app. Dos formas y nada mas: a 16px
+       cualquier detalle se convierte en un borron. -->
+  <rect width="32" height="32" rx="7" fill="#d4002d"/>
+  <g fill="#ffffff">
+    <rect x="13.4" y="5.5" width="5.2" height="9" rx="1"/>
+    <path d="M8.4 13.6h15.2L16 23z"/>
+    <rect x="8" y="24.4" width="16" height="3" rx="1.5"/>
+  </g>
+</svg>

@@ -690,8 +690,20 @@ function libraryTile(item) {
     const formats = (item.formats && item.formats.length)
         ? item.formats
         : (isAudio ? ['audio'] : []);
+    // Cintillo de bundle: esta obra se bajo emparejada con su otra edicion.
+    // El tooltip dice cual es el par y donde quedo, porque el cintillo solo no
+    // explica nada a las dos semanas.
+    const bundleRibbon = item.bundle_id
+        ? '<span class="bundle-ribbon" title="'
+          + 'Parte de un bundle: ' + (item.bundle_title || item.bundle_id)
+          + ' (' + (BUNDLE_LANG_LABEL[item.bundle_lang] || item.bundle_lang || '') + ')'
+          + (item.bundle_complete ? ' - las dos ediciones completas' : ' - la otra edicion aun no termina')
+          + '. En output/bundles/' + item.bundle_id
+          + '">BUNDLE</span>'
+        : '';
+
     // Un audiolibro a medias se ve desde la rejilla, sin tener que abrirlo.
-    const badges = (item.incomplete
+    const badges = bundleRibbon + (item.incomplete
         ? '<span class="fmt-badge is-partial" title="La descarga quedó a medias">INCOMPLETO</span>'
         : '') + (item.location === 'local'
         ? '<span class="fmt-badge loc-local" title="Aún no está en la biblioteca">LOCAL</span>'
@@ -1895,6 +1907,22 @@ function createBookCardHTML(book) {
                     </div>
                 </div>
 
+                <!-- Bundle: las dos ediciones del libro, los cinco formatos, con
+                     imagenes. Arranca deshabilitado y solo se habilita cuando
+                     /api/book/<id>/editions confirma que existe la contraparte.
+                     La nota de abajo muestra SIEMPRE con que libro emparejo:
+                     unir ediciones es una conjetura y solo quien lee los dos
+                     titulos sabe si acerto. -->
+                <label class="bundle-option book-only flex items-start gap-2 border-t border-zinc-100 pt-4 opacity-60 cursor-not-allowed">
+                    <input type="checkbox" class="bundle-toggle w-4 h-4 mt-0.5 rounded border-zinc-300 text-oreilly-blue focus:ring-oreilly-blue/20" disabled>
+                    <span>
+                        <span class="text-sm font-medium text-zinc-700">Bundle</span>
+                        <span class="bundle-note block text-xs text-zinc-400">Buscando edición en español…</span>
+                        <span class="bundle-match block text-xs"></span>
+                        <span class="bundle-lock-note hidden block text-xs text-zinc-400 mt-1">Formato, capítulos, salida e imágenes los fija el bundle.</span>
+                    </span>
+                </label>
+
                 <!-- Va en el cuerpo de la modal, NO dentro de Advanced Options:
                      se decide en cada descarga, asi que tiene que verse sin
                      desplegar nada. Solo para libros; un audiolibro no tiene
@@ -1922,7 +1950,7 @@ function createBookCardHTML(book) {
                                 <option value="original" selected>Original (no translation)</option>
                                 <option value="es-LATAM">Español (Latinoamérica)</option>
                             </select>
-                            <span class="block text-xs text-zinc-400 mt-1">Uses your local Ollama model. Slower; code is left untouched.</span>
+                            <span class="block text-xs text-zinc-400 mt-1">Uses the local NLLB translation service. Code, formulas and images are left untouched.</span>
                         </div>
 
                         <div class="chunking-options hidden flex gap-4 p-4 bg-zinc-50 rounded-lg">
@@ -2110,6 +2138,454 @@ async function loadChaptersIfNeeded(cardElement, bookId) {
     }
 }
 
+
+/* ===== Modal de progreso de un bundle =====
+   Un bundle son dos descargas, asi que la modal del libro no cuenta la
+   historia: el progreso de una sola no dice nada de la otra. Se lee de
+   /api/queue filtrando por bundle_id -- los jobs ya lo llevan, asi que no hace
+   falta un endpoint nuevo ni un canal de progreso aparte. */
+
+const BUNDLE_LANG_LABEL = { en: 'Inglés', es: 'Español' };
+
+// Nombres legibles de los formatos, para no enseñar claves internas.
+const BUNDLE_FMT_LABEL = {
+    markdown: 'Markdown', json: 'JSON', plaintext: 'Plain Text',
+    pdf: 'PDF', epub: 'EPUB',
+};
+
+function bundleFormatList(codes) {
+    return (codes || []).map(function (c) { return BUNDLE_FMT_LABEL[c] || c; }).join(', ');
+}
+
+const BUNDLE_STATUS_TEXT = {
+    queued: 'En cola',
+    running: 'Descargando',
+    paused: 'Pausado (sesión expirada)',
+    completed: 'Completado',
+    error: 'Error',
+    cancelled: 'Cancelado',
+};
+const BUNDLE_DONE = ['completed', 'error', 'cancelled'];
+
+// El orden en que el downloader genera los formatos. No es cosmetico: de aqui
+// sale que un formato anterior al que se esta generando ahora ya termino.
+const BUNDLE_FMT_ORDER = ['markdown', 'json', 'plaintext', 'pdf', 'epub'];
+
+// `job.phase` lleva el status crudo del downloader, y es lo UNICO que dice que
+// formato esta saliendo en este momento: `job.files` no se rellena hasta que la
+// descarga entera termina, asi que durante la corrida esta vacio.
+const BUNDLE_PHASE_FMT = {
+    generating_markdown: 'markdown',
+    generating_json: 'json',
+    generating_plaintext: 'plaintext',
+    generating_pdf: 'pdf',
+    generating_pdf_chapters: 'pdf',
+    generating_epub: 'epub',
+};
+// Fases posteriores a los cinco formatos: si el job esta aqui, ya salieron.
+const BUNDLE_PHASE_AFTER = ['generating_toon', 'generating_chunks', 'transferring'];
+
+const BUNDLE_FMT_STYLE = {
+    kept:    { bar: 'bg-zinc-300',     text: 'text-zinc-400' },
+    done:    { bar: 'bg-emerald-500',  text: 'text-emerald-600' },
+    active:  { bar: 'bg-oreilly-blue', text: 'text-oreilly-blue' },
+    pending: { bar: 'bg-zinc-300',     text: 'text-zinc-400' },
+    error:   { bar: 'bg-red-500',      text: 'text-red-600' },
+    stopped: { bar: 'bg-zinc-300',     text: 'text-amber-600' },
+    missing: { bar: 'bg-amber-400',    text: 'text-amber-600' },
+};
+
+let bundlePoll = { timer: null, id: null };
+
+/* Estado de UN formato dentro de UN idioma.
+ *
+ * `kept` es un formato que ya estaba en la carpeta del bundle: el servidor lo
+ * saca de la lista a descargar, asi que ningun job lo va a mencionar nunca y
+ * sin esto se quedaria en "En espera" para siempre. */
+function bundleFormatState(job, fmt, kept) {
+    if (kept) return { key: 'kept', label: 'Ya estaba', fill: 100 };
+    if (!job) return { key: 'pending', label: 'En espera', fill: 0 };
+
+    const failed = (job.format_errors || {})[fmt];
+    if (failed) return { key: 'error', label: 'Falló', fill: 100, detail: String(failed) };
+    if ((job.files || {})[fmt]) return { key: 'done', label: 'Listo', fill: 100 };
+
+    // Termino sin dejar archivo ni error para este formato. No se dice "Listo"
+    // por educacion: si no hay archivo, no hay archivo.
+    if (job.status === 'completed') return { key: 'missing', label: 'Sin archivo', fill: 0 };
+    if (job.status === 'error' || job.status === 'cancelled') {
+        return { key: 'stopped', label: 'Sin hacer', fill: 0 };
+    }
+
+    const current = BUNDLE_PHASE_FMT[job.phase];
+    if (current === fmt) return { key: 'active', label: 'Generando…', fill: 100 };
+    if (current) {
+        return BUNDLE_FMT_ORDER.indexOf(fmt) < BUNDLE_FMT_ORDER.indexOf(current)
+            ? { key: 'done', label: 'Listo', fill: 100 }
+            : { key: 'pending', label: 'En espera', fill: 0 };
+    }
+    if (BUNDLE_PHASE_AFTER.includes(job.phase)) return { key: 'done', label: 'Listo', fill: 100 };
+    return { key: 'pending', label: 'En espera', fill: 0 };
+}
+
+/* Repinta las cinco barras de formato de una seccion. */
+function paintBundleFormats(section, job) {
+    const kept = section._kept || [];
+    section.querySelectorAll('.bundle-fmt').forEach(function (row) {
+        const fmt = row.dataset.fmt;
+        const state = bundleFormatState(job, fmt, kept.includes(fmt));
+        const style = BUNDLE_FMT_STYLE[state.key] || BUNDLE_FMT_STYLE.pending;
+
+        const bar = row.querySelector('.bundle-fmt-bar');
+        bar.style.width = state.fill + '%';
+        bar.className = 'bundle-fmt-bar h-full rounded-full transition-all duration-300 '
+                      + style.bar
+                      // Indeterminada a proposito: el downloader no publica el
+                      // avance DENTRO de un formato, solo cual esta haciendo.
+                      // Una barra que se llenara sola estaria inventando.
+                      + (state.key === 'active' ? ' bundle-fmt-bar--active' : '');
+
+        const label = row.querySelector('.bundle-fmt-state');
+        label.className = 'bundle-fmt-state text-[0.6875rem] ' + style.text;
+        label.textContent = state.label;
+        label.title = state.detail || '';
+    });
+}
+
+/* Una seccion por idioma: cabecera, barra global y las cinco de formato. */
+function bundleSection(spec) {
+    const section = document.createElement('div');
+    section.dataset.jobId = spec.job_id || '';
+    section.dataset.lang = spec.language || '';
+    section._kept = spec.kept || [];
+    section.innerHTML =
+        '<div class="flex items-baseline justify-between gap-3">'
+      +   '<span class="bundle-sec-lang text-xs font-semibold uppercase tracking-wide text-oreilly-blue"></span>'
+      +   '<span class="bundle-sec-pct text-xs font-medium text-zinc-500">0%</span>'
+      + '</div>'
+      + '<p class="bundle-sec-title text-sm font-medium text-zinc-700 mt-0.5"></p>'
+      + '<div class="h-1.5 bg-zinc-100 rounded-full overflow-hidden mt-2">'
+      +   '<div class="bundle-sec-bar h-full bg-oreilly-blue rounded-full transition-all duration-300" style="width:0%"></div>'
+      + '</div>'
+      + '<p class="bundle-sec-msg text-xs text-zinc-400 mt-1.5">En cola</p>'
+      + '<div class="bundle-fmt-list mt-3 space-y-2 pl-3 border-l-2 border-zinc-100"></div>';
+
+    // textContent y no innerHTML: los titulos vienen del catalogo de O'Reilly.
+    section.querySelector('.bundle-sec-lang').textContent =
+        BUNDLE_LANG_LABEL[spec.language] || String(spec.language || '').toUpperCase();
+    section.querySelector('.bundle-sec-title').textContent = spec.title || '';
+    if (spec.formats && spec.formats.length) {
+        section.querySelector('.bundle-sec-msg').textContent =
+            'En cola · ' + bundleFormatList(spec.formats);
+    } else {
+        section.querySelector('.bundle-sec-msg').textContent = 'Nada que descargar';
+        section.querySelector('.bundle-sec-pct').textContent = '100%';
+        section.querySelector('.bundle-sec-bar').style.width = '100%';
+    }
+
+    const list = section.querySelector('.bundle-fmt-list');
+    BUNDLE_FMT_ORDER.forEach(function (fmt) {
+        const row = document.createElement('div');
+        row.className = 'bundle-fmt';
+        row.dataset.fmt = fmt;
+        row.innerHTML =
+            '<div class="flex items-baseline justify-between gap-2">'
+          +   '<span class="bundle-fmt-name text-xs font-medium text-zinc-600"></span>'
+          +   '<span class="bundle-fmt-state text-[0.6875rem] text-zinc-400"></span>'
+          + '</div>'
+          + '<div class="h-1 bg-zinc-100 rounded-full overflow-hidden mt-1">'
+          +   '<div class="bundle-fmt-bar h-full rounded-full transition-all duration-300" style="width:0%"></div>'
+          + '</div>';
+        row.querySelector('.bundle-fmt-name').textContent = BUNDLE_FMT_LABEL[fmt] || fmt;
+        list.appendChild(row);
+    });
+
+    paintBundleFormats(section, null);
+    return section;
+}
+
+function openBundleModal(result) {
+    const modal = document.getElementById('bundle-modal');
+    if (!modal) return;
+
+    const jobs = result.jobs || [];
+    const skipped = result.skipped || [];
+
+    let subtitle;
+    if (!jobs.length) {
+        subtitle = 'Ya estaba completo: no hay nada que descargar.';
+    } else {
+        const detalle = jobs.map(function (j) {
+            return `${BUNDLE_LANG_LABEL[j.language] || j.language}: ${bundleFormatList(j.formats)}`;
+        }).join(' · ');
+        // Si algo ya estaba en la carpeta se dice de frente: al volver a darle
+        // a Descargar, la pregunta es "¿que baja esta vez?", no "¿que hay?".
+        const parcial = skipped.length > 0 || jobs.some(function (j) {
+            return (j.formats || []).length < BUNDLE_FMT_ORDER.length;
+        });
+        subtitle = (parcial ? 'Solo falta descargar — ' : '') + detalle;
+        if (skipped.length) {
+            subtitle += ` · ya completo en ${skipped.map(function (sk) {
+                return BUNDLE_LANG_LABEL[sk.language] || sk.language;
+            }).join(', ')}`;
+        }
+    }
+    document.getElementById('bundle-modal-sub').textContent = subtitle;
+    document.getElementById('bundle-modal-path').textContent = result.dir || '';
+
+    // Una seccion por idioma, se vaya a bajar algo o no. Un bundle son las dos
+    // ediciones: enseñar solo la mitad que falta esconde justo lo que se pidio
+    // ver -- que hay ya en cada idioma y que esta entrando ahora.
+    const have = (result.gap || {}).have || {};
+    const specs = jobs.map(function (j) {
+        return {
+            job_id: j.job_id, language: j.language, title: j.title,
+            formats: j.formats, kept: have[j.language] || [],
+        };
+    });
+    skipped.forEach(function (sk) {
+        specs.push({
+            job_id: '', language: sk.language, title: sk.title,
+            formats: [], kept: have[sk.language] || BUNDLE_FMT_ORDER.slice(),
+        });
+    });
+    // Ingles primero, como en la carpeta.
+    specs.sort(function (a, b) {
+        return (a.language === 'en' ? 0 : 1) - (b.language === 'en' ? 0 : 1);
+    });
+
+    const rows = document.getElementById('bundle-modal-rows');
+    rows.innerHTML = '';
+    specs.forEach(function (spec) { rows.appendChild(bundleSection(spec)); });
+
+    modal.classList.remove('hidden');
+    document.body.style.overflow = 'hidden';
+
+    bundlePoll.id = result.bundle_id;
+    if (bundlePoll.timer) clearInterval(bundlePoll.timer);
+    bundlePoll.timer = null;
+    // Sin jobs no hay nada que sondear: la cola no va a decir nada nuevo.
+    if (!jobs.length) return;
+    bundlePoll.timer = setInterval(refreshBundleModal, 1000);
+    refreshBundleModal();
+}
+
+function closeBundleModal() {
+    const modal = document.getElementById('bundle-modal');
+    if (modal) modal.classList.add('hidden');
+    document.body.style.overflow = '';
+    if (bundlePoll.timer) clearInterval(bundlePoll.timer);
+    bundlePoll.timer = null;
+    // Cerrar la ventana NO cancela nada: la cola sigue con lo suyo.
+}
+
+async function refreshBundleModal() {
+    if (!bundlePoll.id) return;
+
+    let data;
+    try {
+        const res = await fetch(`${API}/api/queue`);
+        data = await res.json();
+    } catch (err) {
+        return;  // un fallo de red no debe romper la ventana; se reintenta solo
+    }
+
+    const jobs = (data.jobs || []).filter(function (j) {
+        return j.bundle_id === bundlePoll.id;
+    });
+    if (!jobs.length) return;
+
+    const rows = document.getElementById('bundle-modal-rows');
+    jobs.forEach(function (job) {
+        // Por job_id cuando ya se conoce; por idioma la primera vez, porque el
+        // servidor pudo devolver un job que ya existia en la cola.
+        const section = rows.querySelector('[data-job-id="' + job.id + '"]')
+                     || rows.querySelector('[data-lang="' + job.bundle_lang + '"]');
+        if (!section) return;
+        section.dataset.jobId = job.id;
+
+        // La barra de arriba es la global de la descarga, y es la unica con un
+        // numero real detras: los capitulos son el 90% del trabajo y no
+        // pertenecen a ningun formato en concreto.
+        const pct = job.percentage || 0;
+        section.querySelector('.bundle-sec-title').textContent = job.title || '';
+        section.querySelector('.bundle-sec-pct').textContent = pct + '%';
+        section.querySelector('.bundle-sec-bar').style.width = pct + '%';
+
+        const parts = [BUNDLE_STATUS_TEXT[job.status] || job.status];
+        if (job.status === 'running') {
+            if (job.total_chapters) {
+                parts.push('capítulo ' + job.current_chapter + '/' + job.total_chapters);
+            }
+            if (job.message) parts.push(job.message);
+        } else if (job.error) {
+            parts.push(job.error);
+        }
+        section.querySelector('.bundle-sec-msg').textContent = parts.filter(Boolean).join(' · ');
+
+        paintBundleFormats(section, job);
+    });
+
+    const finished = jobs.every(function (j) { return BUNDLE_DONE.includes(j.status); });
+    if (!finished) return;
+
+    if (bundlePoll.timer) clearInterval(bundlePoll.timer);
+    bundlePoll.timer = null;
+
+    const allOk = jobs.every(function (j) { return j.status === 'completed'; });
+    document.getElementById('bundle-modal-sub').textContent = allOk
+        ? 'Bundle completo. Ya está en la biblioteca.'
+        : 'Bundle terminado con fallos. Lo que sí bajó se conservó.';
+
+    if (typeof loadLibrary === 'function') loadLibrary();
+}
+
+(function wireBundleModal() {
+    function attach() {
+        const close = document.getElementById('bundle-modal-close');
+        if (close) close.addEventListener('click', closeBundleModal);
+        const backdrop = document.getElementById('bundle-modal-backdrop');
+        if (backdrop) backdrop.addEventListener('click', closeBundleModal);
+    }
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', attach);
+    } else {
+        attach();
+    }
+})();
+
+/**
+ * Bloquea los controles que el bundle decide por ti.
+ *
+ * Un bundle fija los cinco formatos, el libro completo, la salida combinada y
+ * las imágenes. Dejar esos controles activos sería ofrecer una elección que el
+ * servidor va a ignorar de todas formas, que es peor que no ofrecerla.
+ */
+function setBundleLock(cardElement, locked) {
+    if (locked) {
+        // Hay que dejar un formato marcado ANTES de deshabilitar: el submit
+        // exige input[name="format"]:checked y si no encuentra ninguno sacude
+        // la seccion y se planta. Y no hay ninguno marcado porque todas las
+        // tarjetas comparten name="format", asi que el navegador las trata
+        // como un solo grupo y solo una radio de toda la pagina puede estarlo.
+        // Markdown, que es con el que arranca el bundle.
+        const md = cardElement.querySelector('input[name="format"][value="markdown"]');
+        if (md) {
+            md.checked = true;
+            // Asignar .checked no dispara 'change', y de ahi cuelga la logica
+            // que ajusta el resto de la modal.
+            md.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+        const combined = cardElement.querySelector('input[name="output-style"][value="combined"]');
+        if (combined) combined.checked = true;
+    }
+
+    ['.format-options', '.chapters-options', '.output-options'].forEach(function (sel) {
+        const group = cardElement.querySelector(sel);
+        if (!group) return;
+        group.querySelectorAll('input').forEach(function (input) { input.disabled = locked; });
+        group.classList.toggle('opacity-40', locked);
+        group.classList.toggle('pointer-events-none', locked);
+    });
+
+    const skip = cardElement.querySelector('.skip-images');
+    if (skip) {
+        skip.disabled = locked;
+        if (locked) skip.checked = false;
+        const label = skip.closest('label');
+        if (label) label.classList.toggle('opacity-40', locked);
+    }
+
+    const lang = cardElement.querySelector('.target-lang');
+    if (lang) {
+        lang.disabled = locked;
+        const wrap = lang.closest('.book-only');
+        if (wrap) wrap.classList.toggle('opacity-40', locked);
+    }
+
+    const note = cardElement.querySelector('.bundle-lock-note');
+    if (note) note.classList.toggle('hidden', !locked);
+}
+
+/**
+ * ¿Existe este libro en español? Habilita (o no) el checkbox de Bundle.
+ *
+ * Nunca contesta un sí pelado: O'Reilly le da a cada edición su propio ISBN y
+ * no las enlaza entre sí, así que emparejarlas es una conjetura con puntaje.
+ * Por eso el título emparejado se muestra siempre — un bundle armado con el
+ * libro equivocado es peor que no tener bundle.
+ */
+async function checkBundleAvailability(cardElement, bookId) {
+    const label = cardElement.querySelector('.bundle-option');
+    const box = cardElement.querySelector('.bundle-toggle');
+    const note = cardElement.querySelector('.bundle-note');
+    const match = cardElement.querySelector('.bundle-match');
+    if (!label || !box || !note || !match) return;
+
+    box.checked = false;
+    box.disabled = true;
+    label.classList.add('opacity-60', 'cursor-not-allowed');
+    label.classList.remove('cursor-pointer');
+    note.textContent = 'Buscando edición en español…';
+    match.textContent = '';
+    setBundleLock(cardElement, false);
+
+    // Marcar como imágenes obligatorias mientras el bundle esté activo: un
+    // bundle promete las ilustraciones, así que las dos opciones se excluyen.
+    box.onchange = () => setBundleLock(cardElement, box.checked);
+
+    try {
+        const res = await fetch(`${API}/api/book/${bookId}/editions?language=es`);
+        const data = await res.json();
+
+        // La tarjeta pudo cerrarse o cambiar mientras buscábamos.
+        if (!cardElement.classList.contains('expanded')) return;
+
+        if (!data.found || !data.candidate) {
+            note.textContent = data.reason || 'No hay edición en español de este libro.';
+            return;
+        }
+
+        box.disabled = false;
+        label.classList.remove('opacity-60', 'cursor-not-allowed');
+        label.classList.add('cursor-pointer');
+        note.textContent = 'Los 5 formatos en inglés y español, con imágenes.';
+
+        const pct = Math.round((data.score || 0) * 100);
+        let line = `Emparejado con: ${data.candidate.title} (${pct}%)`;
+        // El aviso importa mas que el porcentaje: un titulo identico al
+        // original suele ser la misma obra listada dos veces, y el bundle
+        // bajaria el mismo libro dos veces sin que se note.
+        if (data.warning) line += ` — ${data.warning}`;
+        match.textContent = line;
+        match.className = 'bundle-match block text-xs '
+            + (data.confident ? 'text-emerald-600' : 'text-amber-600');
+
+        // Que falta de verdad, leido del disco. Sin esto la casilla promete
+        // diez archivos aunque ocho ya esten ahi.
+        const gap = data.bundle;
+        if (gap && gap.exists && gap.total) {
+            if (gap.complete) {
+                note.textContent = `Ya está completo: ${gap.have_count}/${gap.total} archivos. No hay nada que descargar.`;
+            } else if (gap.have_count > 0) {
+                const parts = [];
+                ['en', 'es'].forEach(function (lang) {
+                    const falta = (gap.missing || {})[lang] || [];
+                    if (falta.length) {
+                        parts.push(`${bundleFormatList(falta)} (${BUNDLE_LANG_LABEL[lang] || lang})`);
+                    }
+                });
+                note.textContent = `Ya tienes ${gap.have_count}/${gap.total}. `
+                    + `Sólo se generará: ${parts.join(' · ')}. `
+                    + 'El libro se descarga entero igual: los capítulos hacen falta para generar cualquier formato.';
+            }
+        }
+    } catch (err) {
+        if (!cardElement.classList.contains('expanded')) return;
+        note.textContent = 'No se pudo comprobar la edición en español.';
+    }
+}
+
 async function expandBook(cardElement, bookId) {
     // Don't allow switching to a different book while one is downloading.
     if (downloadInProgress && currentExpandedCard && currentExpandedCard !== cardElement) {
@@ -2137,6 +2613,11 @@ async function expandBook(cardElement, bookId) {
     expanded.classList.remove('hidden');
     document.getElementById('search-results').classList.add('has-expanded');
     currentExpandedCard = cardElement;
+
+    // Sin await a proposito: la modal abre ya y el checkbox se habilita cuando
+    // la busqueda vuelve. Bloquear la apertura por una peticion de red seria
+    // pagar latencia en el 100% de los casos por una opcion que se usa poco.
+    checkBundleAvailability(cardElement, bookId);
 
     // El panel flota centrado en pantalla: no hace falta desplazar la lista.
     // Se oscurece el fondo y se congela su scroll mientras está abierto.
@@ -2367,6 +2848,14 @@ async function download(cardElement) {
     if (!isAudio) {
         // Por libro: hay títulos que sin sus figuras no se entienden y otros
         // donde las imágenes son puro peso.
+        const bundleBox = cardElement.querySelector('.bundle-toggle');
+        if (bundleBox && bundleBox.checked && !bundleBox.disabled) {
+            // El servidor vuelve a resolver la contraparte: el checkbox dice
+            // que existe, no cual es, y confiar en un id que viaje desde el
+            // navegador seria confiar en el cliente para elegir que se baja.
+            requestBody.bundle = true;
+            requestBody.bundle_language = 'es';
+        }
         if (cardElement.querySelector('.skip-images').checked) {
             requestBody.skip_images = true;
         }
@@ -2394,6 +2883,16 @@ async function download(cardElement) {
             downloadBtn.classList.remove('hidden');
             cancelBtn.classList.add('hidden');
             setDownloadLock(false);  // POST rejected (e.g. already in progress) — unlock
+            return;
+        }
+
+        if (result.bundle) {
+            // La tarjeta ya no sirve: hay DOS descargas y su progreso vive en
+            // la cola, no en este poll. Se cierra y se abre la ventana del
+            // bundle, que lee de /api/queue filtrando por bundle_id.
+            setDownloadLock(false);
+            collapseBook();
+            openBundleModal(result);
             return;
         }
 

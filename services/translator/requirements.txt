@@ -1,0 +1,48 @@
+# NLLB translation service. Separate venv from the oreilly-ingest app on
+# purpose: CTranslate2 and CUDA have nothing to do with the app's dependencies,
+# and the app has to keep starting on a machine with no GPU.
+#
+# Pins are the versions this was built against. Where the pin matters, it says
+# why, because "upgrade and see" is expensive with a 3.5 GB model behind it.
+
+# Inference engine. 4.5.x is the CUDA 12 / cuDNN 9 line, which matches the
+# 571.96 driver on this machine and the DLLs shipped by the torch cu124 build.
+ctranslate2==4.5.0
+
+# Tokenizer only; no model is ever loaded through transformers. The pin is not
+# cosmetic: the HF NLLB tokenizer has moved the source language token between
+# the start and the end of the sequence across versions (legacy_behaviour), and
+# the wrong position silently degrades translation quality. engine.py asserts
+# the position at startup so a bad upgrade fails loudly instead.
+transformers==4.46.3
+tokenizers==0.20.3
+sentencepiece==0.2.0
+
+# Sentence segmentation. Not optional: NLLB is a sentence-level model and a
+# whole paragraph gets quietly truncated, not rejected.
+pysbd==0.3.4
+
+# HTTP layer.
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+pydantic==2.10.4
+
+# Model download. Only ever used by scripts/download_model.py; the service
+# itself runs fully offline (local_files_only=True).
+huggingface-hub==0.27.0
+
+# VRAM telemetry for /health. Imports as `pynvml`.
+nvidia-ml-py==12.560.30
+
+# numpy 2 changed the C ABI, and both ctranslate2 and transformers ship wheels
+# built against 1.x. Staying on 1.26 avoids a class of import-time crash that
+# has nothing to do with this service.
+numpy==1.26.4
+
+# NOT here on purpose: torch.
+#
+# It is a 2.5 GB download and this service never imports it. On Windows it is
+# useful for exactly one thing: its CUDA build bundles the cuBLAS and cuDNN DLLs
+# that CTranslate2 needs, in torch/lib. If the lighter options fail, install it
+# with `setup.ps1 -WithTorchCuda`, which adds it explicitly rather than dragging
+# it in behind your back. See app/cudaload.py.

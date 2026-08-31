@@ -1,121 +1,560 @@
-"""Translation plugin: translate chapter HTML via a local Ollama LLM.
+"""Translation plugin: translate chapter HTML via the local NLLB service.
 
-Strategy — translate whole *blocks*, not individual text nodes.
+The service lives in services/translator (NLLB-200-3.3B on CTranslate2, int8,
+on the local GPU). See its README for setup.
 
-Publisher HTML splits sentences across inline markup, e.g.
+THE PROBLEM
+-----------
+NLLB is an encoder-decoder translation model. It has no system prompt and no
+concept of a rule, so it cannot be asked to preserve markup. Feed it HTML and
+the HTML comes back mangled. The tags have to be taken out of its way and put
+back afterwards.
 
-    <p>A <i>class</i> is a blueprint. The <code>pd.Series</code> class is ...</p>
+So each leaf block becomes a template where every piece of markup is a short
+numeric placeholder:
 
-Translating each text node on its own gives the model blind fragments ("A ",
-"class", " is a blueprint. The ") that it cannot reorder, which produced
-orphaned words and English word order in Spanish. Instead each leaf block is
-sent as one HTML fragment: the model sees the full sentence, keeps the inline
-tags, and is free to move them where Spanish needs them.
+    <p>The <code>pd.Series</code> class is a <i>blueprint</i>.</p>
+      encodes to
+    "The %%0%% class is a %%1%%blueprint%%2%%."
 
-Guarantees:
-- Text inside pre/code/kbd/samp/var/tt is never translated; a translated block
-  is rejected if any such content failed to survive verbatim.
-- Batches go to Ollama as numbered JSON so replies stay aligned with inputs.
-- Failure is non-fatal: if Ollama is unreachable or a batch fails, the original
-  markup is kept so a download never breaks because of translation.
+The model sees the whole sentence, which is what it needs to get Spanish word
+order right, and it carries the placeholders along with the words they belong
+to. Then the markup goes back in. Protected content is *never sent*: it cannot
+be corrupted because it never leaves this process.
 
-This plugin uses its own tiny HTTP client (not the shared HttpClient, which is
-coupled to O'Reilly's cookies/Akamai handling). Ollama is plain local HTTP.
+WHAT WAS MEASURED (not assumed)
+-------------------------------
+Probing the running service:
+
+- The source's line wrapping was costing whole paragraphs, and that was a bug
+  here rather than in the model. Publisher HTML wraps its lines, so a template
+  arrived with newlines mid-sentence; a placeholder stranded at the start of a
+  wrapped line got silently dropped and the block lost its translation.
+  Collapsing the wrapping before sending fixed it. Biggest single cause of loss.
+- Opaque placeholders beat real tag names. Given
+  "Choose <i>one</i>, <i>two</i> or <i>three</i>." the model returned
+  "Elige uno, dos o tres." -- flawless, and stripped of every tag. It
+  *recognises* markup and feels free to discard it, while a placeholder is
+  meaningless text it simply copies. Adversarial probe: 6/9 against 5/9.
+- Loss is still real, and does not scale with how many placeholders there are:
+  12 survived a sentence where 6 did not. The trigger is heavy restructuring,
+  e.g. "See X for Y" -> "Vease X para Y". Changing the beam width rescues
+  nothing (0 of 4 failing cases at beam 1 and beam 2).
+- After the whitespace fix, a 13-block chapter sample carrying 18 placeholders
+  came back with every protected placeholder intact and one formatting pair
+  lost. scripts/check_translate_markup.py is that check, and its encoder
+  assertions run with no GPU and no service.
+
+IDEAS TAKEN FROM oomol-lab/epub-translator
+------------------------------------------
+That project solves the same problem surgically, for an instruction-following
+model. Three of its ideas transfer; one does not.
+
+1. Blocks are "everything that is not inline", derived from the MDN inline-level
+   element list, instead of a hand-written list of block tags. Exhaustive, and
+   it fixes a real bug: a <div> holding only inline content used to fall through
+   to per-text-node translation, which handed the model blind fragments.
+2. Markup is restored from the ORIGINAL element, never from what the model
+   returned. An href cannot be corrupted because it is never sent.
+3. Best-effort reassembly instead of all-or-nothing. This is the important one.
+   When "Elige uno, dos o tres." came back without its italics, the old
+   behaviour discarded it and left the reader with English. Losing italics is a
+   far smaller loss than losing the translation.
+
+   So placeholders are classified. PROTECTED ones (code, images, formulas) hold
+   content that would vanish with them, so if one is lost the block is rejected
+   and retried. FORMATTING ones (i, b, a, sup) hold only appearance: if one is
+   lost, the translation is kept and that formatting is dropped.
+
+4. NOT taken: their real-tag-name-with-minimal-ids encoding. It depends on a
+   model that can be told to preserve tags, and the measurement above shows it
+   is actively worse here.
+
+THE LADDER
+----------
+    1. full     -- protected content plus formatting pairs
+    2. bare     -- protected content only, formatting flattened: far fewer
+                   placeholders, so the code has the best chance of surviving.
+                   Skipped when there is no formatting to flatten, because the
+                   template would come out identical and beam search is
+                   deterministic: same input, same dropped placeholder
+    3. give up  -- the block keeps its original text
+
+Each rung is one batched request per chapter, not one per block. Failure is
+non-fatal throughout: if the service is unreachable or a request fails, the
+original markup is kept so a download never breaks because of translation.
 """
 
 import json
 import re
+import urllib.error
+import urllib.request
+from dataclasses import dataclass, field
+from html import escape
 
 from bs4 import BeautifulSoup, NavigableString
 
 import config
 from .base import Plugin
 
-# curl_cffi is already a project dependency (used by HttpClient).
-from curl_cffi import requests
+# HTML inline-level elements, from MDN's inline-level content list plus MathML.
+# Everything NOT in here is a block, which is how leaf blocks get found.
+# Source of the idea and of the list: oomol-lab/epub-translator, xml/inline.py.
+INLINE_TAGS = frozenset({
+    # inline text semantics
+    "a", "abbr", "b", "bdi", "bdo", "br", "cite", "code", "data", "dfn", "em",
+    "i", "kbd", "mark", "q", "rp", "rt", "ruby", "s", "samp", "small", "span",
+    "strong", "sub", "sup", "time", "u", "var", "wbr", "tt",
+    # image and multimedia
+    "img", "svg", "canvas", "audio", "video", "map", "area", "picture",
+    # form elements
+    "input", "button", "select", "textarea", "label", "output", "progress",
+    "meter",
+    # embedded content
+    "iframe", "embed", "object",
+    # other
+    "script", "del", "ins", "slot",
+    # MathML
+    "math", "mi", "mn", "mo", "ms", "mspace", "mtext", "menclose", "merror",
+    "mfenced", "mfrac", "mpadded", "mphantom", "mroot", "mrow", "msqrt",
+    "mstyle", "mmultiscripts", "mover", "mprescripts", "msub", "msubsup",
+    "msup", "munder", "munderover", "mtable", "mtr", "mtd", "annotation",
+    "annotation-xml", "semantics", "maction",
+})
+
+# Content that must never be translated AND must never be lost. One placeholder
+# each, holding the element's whole markup. If one of these does not come back,
+# the block is rejected: dropping it would delete a code span or an image.
+PROTECTED_TAGS = frozenset({
+    "pre", "code", "kbd", "samp", "var", "tt", "script", "style",
+    "img", "svg", "math", "iframe", "object", "embed", "audio", "video",
+    "canvas", "picture",
+})
+
+# Appearance only. A pair of placeholders, and losing them costs a bit of
+# formatting, not content, so the translation is kept anyway.
+FORMATTING_TAGS = frozenset({
+    "a", "i", "b", "em", "strong", "span", "sup", "sub", "abbr", "cite", "q",
+    "small", "u", "mark", "dfn", "s", "del", "ins", "time", "data", "bdi",
+    "bdo", "ruby", "rt", "rp",
+})
+
+# Void and optional: losing a <br> merges two lines. Cosmetic.
+OPTIONAL_VOID_TAGS = frozenset({"br", "wbr", "hr"})
+
+# Built with an f-string, NOT printf formatting. "%%%d%%" % 0 yields "%0%", not
+# "%%0%%": printf reads each "%%" as one literal percent. That silently produced
+# a different marker from the one that was benchmarked, and left the scrub regex
+# below unable to match its own placeholders. Keep these two in agreement; the
+# check in scripts/check_translate_markup.py asserts that they are.
+def placeholder_for(index: int) -> str:
+    return f"%%{index}%%"
+
+
+_PLACEHOLDER_RE = re.compile(r"%%\d+%%")
+
+_WHITESPACE = re.compile(r"\s+")
+
+
+def collapse_whitespace(text: str) -> str:
+    """Squeeze runs of whitespace to one space.
+
+    Publisher HTML wraps its source lines, so a paragraph arrives with newlines
+    sitting in the middle of sentences. Those newlines are invisible in HTML --
+    every renderer collapses them -- but they are NOT invisible to the model:
+    measured on a real chapter, a placeholder that ended up alone at the start
+    of a wrapped line was silently dropped, while the same paragraph on one line
+    kept every placeholder. So the wrapping is removed before sending.
+
+    Safe because the one place whitespace is significant, <pre>, is protected
+    content: it travels inside a placeholder and never appears in the template.
+    Collapsing to a space rather than stripping matters too -- a text node that
+    is nothing but a newline between two inline tags is a word boundary, and
+    deleting it would glue two words together.
+    """
+    return _WHITESPACE.sub(" ", text)
+
+# The model sometimes shifts a space across a placeholder boundary, which after
+# substitution reads as "<i> word</i>". Cosmetic, and trivial to undo.
+_FORMATTING_ALT = "|".join(sorted(FORMATTING_TAGS))
+_OPEN_SPACE = re.compile(r"(<(?:%s)\b[^>]*>)(\s+)" % _FORMATTING_ALT)
+_CLOSE_SPACE = re.compile(r"(\s+)(</(?:%s)\s*>)" % _FORMATTING_ALT)
+
+
+def is_inline_name(name: str | None) -> bool:
+    return bool(name) and name.lower() in INLINE_TAGS
+
+
+@dataclass
+class _Unit:
+    """One thing to translate, and how to put the answer back."""
+
+    kind: str                      # "block" or "orphan"
+    element: object = None         # leaf block, for kind == "block"
+    node: object = None            # NavigableString, for kind == "orphan"
+    lead: str = ""                 # whitespace to restore around an orphan
+    trail: str = ""
+    template: str = ""
+    slots: list = field(default_factory=list)      # index -> markup to restore
+    required: set = field(default_factory=set)     # indices that must survive
+    pairs: list = field(default_factory=list)      # (open index, close index)
+    full_markup: bool = True
+    degraded: bool = False         # translated, but some formatting was lost
 
 
 class TranslatorPlugin(Plugin):
-    """Translate chapter HTML into a target language using a local LLM."""
+    """Translate chapter HTML into a target language using the local NLLB service."""
 
-    # Never translate text inside these elements (or their descendants).
-    SKIP_TAGS = {"pre", "code", "script", "style", "kbd", "samp", "var", "tt"}
+    # Kept as attributes because other code and tests reach for them.
+    PROTECTED_TAGS = PROTECTED_TAGS
+    INLINE_TAGS = INLINE_TAGS
 
-    # Elements treated as translation units. A block is only used when it has
-    # no nested block of its own, so content is never translated twice.
-    BLOCK_TAGS = {
-        "p", "li", "h1", "h2", "h3", "h4", "h5", "h6",
-        "td", "th", "dd", "dt", "blockquote", "figcaption", "caption",
-    }
+    # --- availability -----------------------------------------------------
 
     def is_available(self) -> bool:
-        """Return True if the Ollama server responds."""
+        """True if the service answers and has the model loaded.
+
+        `loaded` is what matters, not the HTTP status: the service starts even
+        when the model failed so that /health can explain why. A 503 with a
+        reason is more useful than a dead port, but it still means no
+        translation.
+        """
         try:
-            resp = requests.get(f"{config.OLLAMA_URL}/api/tags", timeout=5)
-            return resp.status_code == 200
+            data = self._get("/health", timeout=5)
         except Exception:
             return False
+        return bool((data or {}).get("model", {}).get("loaded"))
+
+    # --- entry point ------------------------------------------------------
 
     def translate_html(self, html: str, target_lang: str) -> str:
         """Translate the prose of an HTML fragment, preserving its markup.
 
-        Returns the original html unchanged if target_lang is falsy/unknown,
-        or if translation fails.
+        Returns the original html unchanged if target_lang is unknown, or if
+        translation fails.
         """
-        lang_instruction = config.TRANSLATE_LANGUAGES.get(target_lang)
-        if not lang_instruction:
+        flores = config.NLLB_TARGET_LANGS.get(target_lang)
+        if not flores:
             return html
 
         soup = BeautifulSoup(html, "lxml")
 
         blocks = self._collect_leaf_blocks(soup)
-        # Text that sits outside every block (rare) still needs translating;
-        # collect it before block contents are swapped out.
+        # Text outside every block still needs translating; collect it before
+        # block contents are swapped out.
         orphans = self._collect_orphan_text_nodes(soup, blocks)
 
         if not blocks and not orphans:
             return html
 
-        if blocks:
-            originals = [el.decode_contents() for el in blocks]
-            translated = self._translate_strings(originals, lang_instruction, html_mode=True)
-            for el, before, after in zip(blocks, originals, translated):
-                if after != before and self._markup_survived(before, after):
-                    self._replace_contents(el, after)
+        units: list[_Unit] = []
+        for element in blocks:
+            unit = self._encode(element, full_markup=True)
+            if unit is not None:
+                units.append(unit)
 
-        if orphans:
-            cores = [core for (_n, _l, core, _t) in orphans]
-            translated = self._translate_strings(cores, lang_instruction, html_mode=False)
-            for (node, lead, _core, trail), text in zip(orphans, translated):
-                node.replace_with(NavigableString(f"{lead}{text}{trail}"))
+        for node, lead, core, trail in orphans:
+            units.append(_Unit(
+                kind="orphan", node=node, lead=lead, trail=trail,
+                template=collapse_whitespace(core),
+            ))
+
+        if not units:
+            return html
+
+        rejected = self._run_round(units, flores)
+
+        # Rung 2: only the blocks that lost protected content. Re-encoded with
+        # formatting flattened, so there are far fewer placeholders and the code
+        # spans have the best chance of coming back.
+        retry: list[_Unit] = []
+        for unit in rejected:
+            if unit.kind != "block":
+                continue
+            bare = self._encode(unit.element, full_markup=False)
+            if bare is None:
+                continue
+            if bare.template == unit.template:
+                # Nothing to flatten, so this rung has nothing new to try.
+                # Sending it again is a wasted GPU call: same input, same
+                # deterministic beam search, same dropped placeholder.
+                continue
+            retry.append(bare)
+
+        if retry:
+            print(f"[TRANSLATE] {len(retry)} bloque(s) reintentados sin formato inline")
+            still = self._run_round(retry, flores)
+            if still:
+                print(f"[TRANSLATE] {len(still)} bloque(s) sin traducir")
+
+        degraded = sum(1 for unit in units if unit.degraded)
+        if degraded:
+            print(f"[TRANSLATE] {degraded} bloque(s) traducidos con formato inline perdido")
 
         # BeautifulSoup+lxml wraps a fragment in <html><body>. Unwrap so the
         # output stays a fragment like html_processor.process produced.
         body = soup.body
         if body is not None:
-            return "".join(str(c) for c in body.contents)
+            return "".join(str(child) for child in body.contents)
         return str(soup)
 
-    # --- unit collection -------------------------------------------------
+    # --- one batched round -------------------------------------------------
+
+    def _run_round(self, units: list[_Unit], flores: str) -> list[_Unit]:
+        """Translate these units in batches and apply what came back.
+
+        Returns the units that had to be rejected outright.
+        """
+        translations = self._translate([unit.template for unit in units], flores)
+        rejected: list[_Unit] = []
+
+        for unit, translated in zip(units, translations):
+            if not translated or not translated.strip():
+                rejected.append(unit)
+                continue
+            if not self._apply(unit, translated):
+                rejected.append(unit)
+
+        return rejected
+
+    def _apply(self, unit: _Unit, translated: str) -> bool:
+        if unit.kind == "orphan":
+            unit.node.replace_with(
+                NavigableString(f"{unit.lead}{translated}{unit.trail}")
+            )
+            return True
+
+        fragment = self._decode(translated, unit)
+        if fragment is None or not fragment.strip():
+            return False
+        self._replace_contents(unit.element, fragment)
+        return True
+
+    # --- encoding ---------------------------------------------------------
+
+    def _encode(self, element, full_markup: bool) -> "_Unit | None":
+        """Turn a block into a template plus the markup its placeholders hold.
+
+        full_markup=True keeps formatting as placeholder pairs. False drops
+        them, keeping only their text, which leaves far fewer placeholders for
+        the model to lose. Returns None when there is no prose to translate.
+        """
+        parts: list[str] = []
+        slots: list[str] = []
+        required: set[int] = set()
+        pairs: list[tuple[int, int]] = []
+
+        def placeholder(markup: str, is_required: bool) -> int:
+            slots.append(markup)
+            index = len(slots) - 1
+            if is_required:
+                required.add(index)
+            parts.append(placeholder_for(index))
+            return index
+
+        def walk(node) -> None:
+            for child in node.children:
+                if isinstance(child, NavigableString):
+                    parts.append(collapse_whitespace(str(child)))
+                    continue
+
+                name = getattr(child, "name", None)
+                if name is None:
+                    continue
+                name = name.lower()
+
+                if name in PROTECTED_TAGS:
+                    # Whole element as one placeholder. Its text never reaches
+                    # the model, and losing it would delete content, so it is
+                    # required.
+                    placeholder(str(child), True)
+                    continue
+
+                if name in OPTIONAL_VOID_TAGS:
+                    placeholder(str(child), False)
+                    continue
+
+                if full_markup and name in FORMATTING_TAGS:
+                    opening = placeholder(_open_tag(child), False)
+                    walk(child)
+                    closing = placeholder(f"</{name}>", False)
+                    pairs.append((opening, closing))
+                    continue
+
+                # Anything else: keep the text, drop the tag.
+                walk(child)
+
+        walk(element)
+        template = "".join(parts).strip()
+
+        if not _PLACEHOLDER_RE.sub("", template).strip():
+            return None  # nothing but markup and whitespace in here
+
+        return _Unit(
+            kind="block",
+            element=element,
+            template=template,
+            slots=slots,
+            required=required,
+            pairs=pairs,
+            full_markup=full_markup,
+        )
+
+    # --- decoding, best effort --------------------------------------------
+
+    def _decode(self, translated: str, unit: _Unit) -> "str | None":
+        """Put the markup back, salvaging what the model lost.
+
+        Returns None only when protected content did not survive, because
+        substituting it is the only way its text gets back into the document.
+        Everything else degrades: a formatting pair that came back broken is
+        dropped and the translated words are kept.
+        """
+        for index in unit.required:
+            if translated.count(placeholder_for(index)) != 1:
+                return None
+
+        text = translated
+        dropped: set[int] = set()
+
+        for opening, closing in unit.pairs:
+            intact = (
+                text.count(placeholder_for(opening)) == 1
+                and text.count(placeholder_for(closing)) == 1
+            )
+            if intact and text.find(placeholder_for(opening)) > text.find(
+                placeholder_for(closing)
+            ):
+                # A closing tag that overtook its opening tag would produce
+                # broken HTML. Reordering as such is fine and expected: Spanish
+                # word order differs, and a pair that travels together lands
+                # somewhere correct.
+                intact = False
+            if not intact:
+                dropped.add(opening)
+                dropped.add(closing)
+                unit.degraded = True
+
+        for index, markup in enumerate(unit.slots):
+            if index in dropped:
+                continue
+            text = text.replace(placeholder_for(index), markup, 1)
+
+        # Anything left is a placeholder the model duplicated, or half of a pair
+        # that was dropped. Neither belongs in the output.
+        leftover = _PLACEHOLDER_RE.search(text)
+        if leftover:
+            unit.degraded = True
+            text = _PLACEHOLDER_RE.sub("", text)
+
+        text = _OPEN_SPACE.sub(r"\2\1", text)
+        text = _CLOSE_SPACE.sub(r"\2\1", text)
+        return text
+
+    # --- HTTP -------------------------------------------------------------
+
+    def _translate(self, texts: list[str], flores: str) -> list:
+        """Translate a list of templates. Failed chunks come back as None.
+
+        Chunk granularity for failure is deliberate: one bad request should cost
+        those paragraphs, not the whole chapter.
+        """
+        out: list = []
+        for chunk in self._chunks(texts):
+            result = self._post_batch(chunk, flores)
+            if result is None or len(result) != len(chunk):
+                out.extend([None] * len(chunk))
+            else:
+                out.extend(result)
+        return out
+
+    @staticmethod
+    def _chunks(texts: list[str]):
+        current: list[str] = []
+        chars = 0
+        for text in texts:
+            too_many = len(current) >= config.TRANSLATE_REQUEST_ITEMS
+            too_big = chars + len(text) > config.TRANSLATE_REQUEST_CHARS
+            if current and (too_many or too_big):
+                yield current
+                current, chars = [], 0
+            current.append(text)
+            chars += len(text)
+        if current:
+            yield current
+
+    def _post_batch(self, texts: list[str], flores: str) -> "list | None":
+        payload = {"texts": texts, "target_lang": flores}
+        try:
+            data = self._post("/translate/batch", payload, config.TRANSLATE_TIMEOUT)
+        except urllib.error.HTTPError as exc:
+            detail = ""
+            try:
+                detail = exc.read().decode("utf-8", "replace")[:200]
+            except Exception:
+                pass
+            print(f"[TRANSLATE] HTTP {exc.code} del servicio: {detail}")
+            return None
+        except Exception as exc:
+            print(f"[TRANSLATE] servicio inalcanzable: {type(exc).__name__}: {exc}")
+            return None
+        return (data or {}).get("translations")
+
+    @staticmethod
+    def _request(path: str, payload: "dict | None", timeout: int):
+        url = f"{config.TRANSLATOR_URL.rstrip('/')}{path}"
+        data = None
+        headers = {}
+        if payload is not None:
+            data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+            headers["Content-Type"] = "application/json"
+        request = urllib.request.Request(url, data=data, headers=headers)
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return json.loads(response.read().decode("utf-8"))
+
+    def _get(self, path: str, timeout: int):
+        return self._request(path, None, timeout)
+
+    def _post(self, path: str, payload: dict, timeout: int):
+        return self._request(path, payload, timeout)
+
+    # --- unit collection --------------------------------------------------
 
     def _collect_leaf_blocks(self, soup) -> list:
-        """Return block elements that contain prose and no nested block."""
+        """Block elements that hold prose and contain no nested block.
+
+        "Block" means "not inline", which is why INLINE_TAGS is the list that
+        gets maintained. A <div> of inline content is a block here; under the
+        old hand-written block list it was not, and its text nodes ended up
+        being translated one at a time as blind fragments.
+        """
         blocks = []
-        for el in soup.find_all(list(self.BLOCK_TAGS)):
-            if el.find(list(self.BLOCK_TAGS)):
-                continue  # not a leaf: its children are the real units
-            if self._has_skipped_ancestor(el):
+        for element in soup.find_all(True):
+            name = (element.name or "").lower()
+            if is_inline_name(name) or name in PROTECTED_TAGS:
                 continue
-            if not self._prose_text(el).strip():
-                continue  # nothing but code/markup to translate
-            blocks.append(el)
+            if self._has_protected_ancestor(element):
+                continue
+            if self._has_block_descendant(element):
+                continue  # not a leaf: its children are the real units
+            if not self._prose_text(element).strip():
+                continue  # nothing but protected content and markup
+            blocks.append(element)
         return blocks
 
-    def _prose_text(self, el) -> str:
-        """Text of an element excluding anything inside skip tags."""
+    @staticmethod
+    def _has_block_descendant(element) -> bool:
+        for descendant in element.find_all(True):
+            name = (descendant.name or "").lower()
+            if not is_inline_name(name) and name not in PROTECTED_TAGS:
+                return True
+        return False
+
+    def _prose_text(self, element) -> str:
+        """Text of an element excluding anything inside protected tags."""
         parts = []
-        for node in el.find_all(string=True):
-            if node.parent is not None and self._has_skipped_ancestor(node):
+        for node in element.find_all(string=True):
+            if node.parent is not None and self._has_protected_ancestor(node):
                 continue
             parts.append(str(node))
         return "".join(parts)
@@ -123,10 +562,10 @@ class TranslatorPlugin(Plugin):
     def _collect_orphan_text_nodes(self, soup, blocks: list) -> list:
         """Translatable text nodes that no collected block covers."""
         covered = set()
-        for el in blocks:
-            covered.add(id(el))
-            for d in el.descendants:
-                covered.add(id(d))
+        for element in blocks:
+            covered.add(id(element))
+            for descendant in element.descendants:
+                covered.add(id(descendant))
 
         collected = []
         for node in soup.find_all(string=True):
@@ -136,189 +575,56 @@ class TranslatorPlugin(Plugin):
             core = raw.strip()
             if not core:
                 continue
-            if self._has_skipped_ancestor(node):
+            if self._has_protected_ancestor(node):
                 continue
             lead = raw[: len(raw) - len(raw.lstrip())]
-            trail = raw[len(raw.rstrip()) :]
+            trail = raw[len(raw.rstrip()):]
             collected.append((node, lead, core, trail))
         return collected
 
-    def _has_skipped_ancestor(self, node) -> bool:
+    @staticmethod
+    def _has_protected_ancestor(node) -> bool:
         for parent in node.parents:
-            if getattr(parent, "name", None) in self.SKIP_TAGS:
+            name = getattr(parent, "name", None)
+            if name and name.lower() in PROTECTED_TAGS:
                 return True
         return False
 
-    # --- applying results -----------------------------------------------
+    # --- applying results -------------------------------------------------
 
-    def _replace_contents(self, el, new_html: str):
+    def _replace_contents(self, element, new_html: str):
         """Swap an element's children for a parsed translated fragment."""
         parsed = BeautifulSoup(new_html, "lxml")
         source = parsed.body if parsed.body is not None else parsed
 
-        # Values are *inner* HTML, but models often echo a wrapping block tag.
-        # Unwrap those, otherwise we'd nest <p> inside <p> (invalid markup that
-        # breaks rendering and EPUB validation).
+        # Values are *inner* HTML. Unwrap any block tag the parser added around
+        # them, otherwise we would nest <p> inside <p>: invalid markup that
+        # breaks rendering and EPUB validation.
         for child in list(source.children):
-            if getattr(child, "name", None) in self.BLOCK_TAGS:
+            name = getattr(child, "name", None)
+            if name and not is_inline_name(name) and name.lower() not in PROTECTED_TAGS:
                 child.unwrap()
 
         children = list(source.contents)
-        el.clear()
+        element.clear()
         for child in children:
-            el.append(child.extract() if child.parent else child)
+            element.append(child.extract() if child.parent else child)
 
-    def _markup_survived(self, before: str, after: str) -> bool:
-        """Reject a translation that mangled or dropped protected content."""
-        if not after.strip():
-            return False
 
-        original = BeautifulSoup(before, "lxml")
-        result_text = BeautifulSoup(after, "lxml").get_text()
+def _open_tag(tag) -> str:
+    """Rebuild an opening tag with its attributes.
 
-        # Every code-ish string must reappear verbatim somewhere in the result.
-        for tag in original.find_all(list(self.SKIP_TAGS)):
-            snippet = tag.get_text().strip()
-            if snippet and snippet not in result_text:
-                return False
-        return True
-
-    # --- batching + LLM --------------------------------------------------
-
-    def _translate_strings(
-        self, strings: list[str], lang_instruction: str, html_mode: bool
-    ) -> list[str]:
-        """Translate a list of strings, preserving order. Falls back to original."""
-        result: list[str] = list(strings)  # default = untranslated
-
-        batch: list[int] = []
-        batch_chars = 0
-
-        def flush(indices: list[int], depth: int = 0):
-            """Translate these indices, splitting to recover missing entries.
-
-            A model can return fewer keys than it was given (output cut short).
-            Rather than leaving those strings in the source language, retry the
-            missing ones in smaller halves until they come back or we bottom out.
-            """
-            if not indices:
-                return
-            mapping = {str(i): strings[i] for i in indices}
-            translated = self._translate_batch(mapping, lang_instruction, html_mode)
-
-            missing = []
-            for i in indices:
-                val = (translated or {}).get(str(i))
-                if isinstance(val, str) and val.strip():
-                    result[i] = val
-                else:
-                    missing.append(i)
-
-            if not missing:
-                return
-            # Give up splitting past a single item / a few levels deep; those
-            # strings simply stay untranslated instead of hanging the download.
-            if depth >= 3 or len(missing) == 1:
-                return
-            mid = len(missing) // 2
-            flush(missing[:mid], depth + 1)
-            flush(missing[mid:], depth + 1)
-
-        for i, s in enumerate(strings):
-            batch.append(i)
-            batch_chars += len(s)
-            if batch_chars >= config.TRANSLATE_BATCH_CHARS:
-                flush(batch)
-                batch, batch_chars = [], 0
-        flush(batch)
-
-        return result
-
-    def _build_system_prompt(self, lang_instruction: str, html_mode: bool) -> str:
-        common = (
-            f"You are a professional technical translator. Translate the VALUES of the "
-            f"given JSON object into {lang_instruction}.\n"
-            "- Keep the SAME keys; translate only the values.\n"
-            "- This is technical book content: preserve meaning and tone.\n"
-            "- Keep verbatim, untranslated: code, identifiers, function/class/method "
-            "names, library names, file paths, CLI commands, keyboard keys (Tab, Enter, "
-            "Shift, Ctrl, Esc), and menu/UI labels.\n"
-            "- Keep well-known technical terms in English when there is no natural "
-            "translation.\n"
-            "- Do not add explanations or notes. Return ONLY a JSON object with the "
-            "same keys."
-        )
-        if not html_mode:
-            return common
-
-        return common + (
-            "\n\nEach value is the INNER HTML of an element:\n"
-            "- Do NOT add a wrapping <p>, <div> or any other block tag around it.\n"
-            "- Preserve every HTML tag and its attributes exactly as given.\n"
-            "- Translate ONLY the human-readable text between tags.\n"
-            "- NEVER change text inside <code>, <kbd>, <samp>, <var> or <tt>; copy it "
-            "character for character.\n"
-            "- Write natural, fluent target-language word order, MOVING the inline tags "
-            "along with the words they belong to. Do not keep English word order.\n"
-            "- Return the full fragment, not a summary."
-        )
-
-    def _translate_batch(
-        self, mapping: dict[str, str], lang_instruction: str, html_mode: bool = False
-    ) -> dict | None:
-        """Send one batch to Ollama. Returns {id: translation} or None on failure."""
-        payload = {
-            "model": config.OLLAMA_MODEL,
-            "messages": [
-                {"role": "system", "content": self._build_system_prompt(lang_instruction, html_mode)},
-                {"role": "user", "content": json.dumps(mapping, ensure_ascii=False)},
-            ],
-            "stream": False,
-            "format": "json",
-            "options": {"temperature": 0.2, "num_ctx": config.OLLAMA_NUM_CTX},
-        }
-        if config.OLLAMA_DISABLE_THINKING:
-            payload["think"] = False
-
-        try:
-            resp = self._post_chat(payload)
-            content = resp.json()["message"]["content"]
-            return self._parse_json_object(content)
-        except Exception:
-            return None
-
-    def _post_chat(self, payload: dict):
-        """POST to Ollama, retrying without `think` if the model rejects it."""
-        resp = requests.post(
-            f"{config.OLLAMA_URL}/api/chat",
-            json=payload,
-            timeout=config.TRANSLATE_TIMEOUT,
-        )
-        # Models without thinking support reject the flag with a 4xx; drop it.
-        if resp.status_code >= 400 and "think" in payload:
-            retry = {k: v for k, v in payload.items() if k != "think"}
-            resp = requests.post(
-                f"{config.OLLAMA_URL}/api/chat",
-                json=retry,
-                timeout=config.TRANSLATE_TIMEOUT,
-            )
-        resp.raise_for_status()
-        return resp
-
-    @staticmethod
-    def _parse_json_object(content: str) -> dict | None:
-        """Parse a JSON object from the model output, tolerating stray wrapping."""
-        content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
-        try:
-            data = json.loads(content)
-            return data if isinstance(data, dict) else None
-        except Exception:
-            pass
-        match = re.search(r"\{.*\}", content, re.DOTALL)
-        if match:
-            try:
-                data = json.loads(match.group(0))
-                return data if isinstance(data, dict) else None
-            except Exception:
-                return None
-        return None
+    Built from tag.attrs rather than sliced out of str(tag): slicing breaks
+    whenever the inner text also appears inside an attribute value. The
+    attributes come from the original element and are never sent to the model,
+    so an href cannot come back corrupted.
+    """
+    parts = [tag.name]
+    for key, value in tag.attrs.items():
+        if value is None:
+            parts.append(key)
+            continue
+        if isinstance(value, (list, tuple)):
+            value = " ".join(str(item) for item in value)
+        parts.append(f'{key}="{escape(str(value), quote=True)}"')
+    return "<" + " ".join(parts) + ">"

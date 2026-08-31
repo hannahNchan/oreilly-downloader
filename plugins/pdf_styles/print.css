@@ -17,6 +17,14 @@
     @bottom-center { content: none; }
 }
 
+/* Portada propia del libro: pagina SIN margenes, para que la imagen ocupe la
+   hoja entera. @page cover hereda el margen de 1in y por eso la imagen salia
+   recuadrada y hundida. */
+@page bookcover {
+    margin: 0;
+    @bottom-center { content: none; }
+}
+
 /* TOC page - no page number */
 @page toc {
     @bottom-center { content: none; }
@@ -35,6 +43,38 @@
     max-height: 5in;
     display: block;
     margin: 0 auto;
+}
+
+/* La portada que viene dentro del epub es una sola imagen a pagina completa,
+   asi que no comparte reglas con la generada (que lleva titulo y autor
+   debajo): con padding-top de 2in y max-height de 5in salia pequena. */
+.book-cover {
+    page: bookcover;
+    page-break-after: always;
+    text-align: center;
+    padding: 0;
+    margin: 0;
+}
+
+.book-cover img {
+    display: block;
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    margin: 0;
+}
+
+/* Titulo de capitulo redundante: el capitulo ya trae el suyo. Se colapsa en
+   vez de borrarse porque de este elemento cuelgan los marcadores del PDF
+   (bookmark-level); con display:none desaparece la caja y con ella el indice
+   lateral del lector. */
+.chapter-title.is-duplicate {
+    font-size: 0;
+    line-height: 0;
+    height: 0;
+    margin: 0;
+    color: transparent;
+    overflow: hidden;
 }
 
 .cover-page h1 {

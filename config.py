@@ -1,8 +1,20 @@
 import json
+import os
 from pathlib import Path
 
 BASE_DIR = Path(__file__).parent
 OUTPUT_DIR = BASE_DIR / "output"
+
+# --- PDF ---
+# WeasyPrint needs Pango, Cairo and GObject. On Linux and macOS those are
+# system packages and the Python module just works. On Windows they are not
+# installed by default and they cannot be borrowed from anywhere: the
+# standalone build packs them INSIDE the executable, so there is no folder to
+# point a DLL search at. Drop that binary at the path below and the PDF plugin
+# shells out to it instead of importing the module.
+WEASYPRINT_BIN = os.environ.get("WEASYPRINT_BIN") or str(
+    BASE_DIR / "tools" / "weasyprint.exe"
+)
 
 # Use data/ directory if it exists (Docker), otherwise use root (local dev)
 DATA_DIR = BASE_DIR / "data"
@@ -65,38 +77,31 @@ def save_setting(key: str, value) -> None:
                    encoding="utf-8")
     tmp.replace(SETTINGS_FILE)
 
-# --- Translation (Ollama) ---
-# Local LLM used to translate chapter content. Ollama exposes a plain HTTP API
-# with no auth, so the translator uses its own small client (not HttpClient,
-# which is coupled to O'Reilly's cookies/Akamai handling).
-OLLAMA_URL = "http://localhost:11434"
-# A general-purpose model that fits entirely in VRAM beats a bigger one that
-# spills to CPU: qwen3.5:9b (~6.6GB) measured ~3x faster than qwen3-coder:30b
-# (18.6GB, offloaded) on the same chapter — and coder models aren't tuned for prose.
-OLLAMA_MODEL = "qwen3.5:9b"
+# --- Translation (local NLLB service) ---
+# services/translator runs NLLB-200-3.3B on CTranslate2 int8 on the local GPU.
+# It is a dedicated encoder-decoder translation model: no system prompt, no
+# refusals, no preamble. Text in, translated text out, which is why none of the
+# output validation an instruction-following model needs is here.
+TRANSLATOR_URL = "http://127.0.0.1:8100"
 
-# Thinking models (qwen3.5, qwen3.6, ...) burn a lot of time "reasoning" before
-# answering, which is pure waste for translation and can pollute the JSON reply.
-# When True the translator asks Ollama to disable it; models that don't support
-# the flag simply get the request retried without it.
-OLLAMA_DISABLE_THINKING = True
+# A chapter goes over in one or two batched requests. These bound each request
+# so it stays inside the service's own limits (200k chars, 1000 items).
+TRANSLATE_REQUEST_CHARS = 150_000
+TRANSLATE_REQUEST_ITEMS = 500
+TRANSLATE_TIMEOUT = 600  # a long chapter is a few hundred sentences
 
-# Text nodes are grouped into batches of roughly this many characters before
-# being sent to the LLM in a single request (fewer round-trips = much faster).
-TRANSLATE_BATCH_CHARS = 4000
-TRANSLATE_TIMEOUT = 300  # seconds; a 30B model on local hardware can be slow
-
-# Ollama defaults to a small context window (4096 tokens). A batch holds the
-# prompt AND the full translated JSON reply, so the default silently truncates
-# the answer — the model closes the JSON early and whole entries come back
-# missing. Give it room for both sides of the exchange.
-OLLAMA_NUM_CTX = 16384
-
-# Supported target languages: code -> human-readable instruction for the model.
-# "es-LATAM" is neutral Latin American Spanish (no country-specific slang).
+# Supported target languages: code -> label shown in the UI.
+# web/server.py validates the requested language against these keys.
 TRANSLATE_LANGUAGES = {
-    "es-LATAM": "neutral Latin American Spanish (español latinoamericano neutro, "
-                "sin modismos ni regionalismos de ningún país específico)",
+    "es-LATAM": "Español (Latinoamérica)",
+}
+
+# code -> FLORES-200 language tag, which is what NLLB speaks. It does not know
+# ISO-639: "es" means nothing to it, "spa_Latn" does. FLORES-200 has exactly one
+# Spanish, so the neutral-LATAM part is handled by the service's deterministic
+# post-edition list rather than by the model.
+NLLB_TARGET_LANGS = {
+    "es-LATAM": "spa_Latn",
 }
 
 HEADERS = {

@@ -324,6 +324,7 @@ class LibraryPlugin(Plugin):
         content_type: str = "book",
         on_progress=None,
         remove_source: bool = True,
+        keep_other_formats: bool = True,
     ) -> dict:
         """Publica en la biblioteca una obra ya terminada en la cache local.
 
@@ -384,6 +385,44 @@ class LibraryPlugin(Plugin):
                 f"Transferencia incompleta: {len(got)}/{len(expected)} archivos{detail}"
             )
 
+        # Rescate de los formatos que esta descarga NO rehizo.
+        #
+        # Una descarga parcial -- bajar solo el PDF que le falta a un bundle --
+        # produce una carpeta con ese formato y nada mas. Publicarla tal cual
+        # borraba de la biblioteca el epub, el markdown y el resto, porque aqui
+        # abajo la carpeta vieja se reemplaza ENTERA. La descarga se veia
+        # perfecta y la obra quedaba mutilada, sin un solo error que lo dijera.
+        #
+        # La regla es estrecha a proposito: un archivo viejo se conserva solo si
+        # esta descarga no genero NADA de su formato. Si rehizo el markdown, los
+        # .md viejos se van -- podrian ser de otra seleccion de capitulos, y
+        # mezclar dos descargas seria peor que perder una.
+        #
+        # metadata.json y la portada quedan fuera del recuento de formatos: son
+        # metadata nuestra, y contarlos haria que toda descarga pareciera haber
+        # producido JSON, que es justo lo que borraba el book.json de al lado.
+        kept = []
+        if keep_other_formats and dest.is_dir():
+            fresh = {
+                FORMAT_BY_SUFFIX[f.suffix.lower()]
+                for f in staging.rglob("*")
+                if f.is_file() and f.name not in NOT_CONTENT
+                and f.suffix.lower() in FORMAT_BY_SUFFIX
+            }
+            for previous in sorted(dest.rglob("*")):
+                if not previous.is_file():
+                    continue
+                rel = previous.relative_to(dest).as_posix()
+                if (staging / rel).exists():
+                    continue                      # lo recien bajado manda
+                fmt = FORMAT_BY_SUFFIX.get(previous.suffix.lower())
+                if fmt and fmt in fresh:
+                    continue                      # rehecho: lo viejo sobra
+                target = staging / rel
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(previous, target)
+                kept.append(rel)
+
         # Publicacion. Si ya existia una version se aparta primero y se borra
         # despues del rename, para que la biblioteca nunca quede sin la obra.
         old = None
@@ -404,6 +443,7 @@ class LibraryPlugin(Plugin):
             "path": str(dest),
             "files": len(expected),
             "bytes": sum(expected.values()),
+            "kept": kept,
         }
 
     def _recover_object(self, obj: Path) -> bool:
@@ -930,7 +970,12 @@ class LibraryPlugin(Plugin):
         published = self.root()
         skip = {published.resolve()} if published is not None else set()
         # Y si la raiz es output mismo, estas tres son su estructura interna.
-        reserved = {"objects", "index", "covers"}
+        # "bundles" no es de la biblioteca sino nuestro (plugins/bundle.py),
+        # pero cuelga de output y por dentro tiene epubs, asi que el escaneo lo
+        # tomaba por una obra: aparecia como un libro fantasma que sumaba otra
+        # vez el tamaño de todos los bundles, y encima le extraia la portada a
+        # output/bundles/cover.jpg.
+        reserved = {"objects", "index", "covers", "bundles"}
 
         items: list[dict] = []
         for folder in sorted(p for p in base.iterdir() if p.is_dir()):

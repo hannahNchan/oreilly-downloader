@@ -50,6 +50,10 @@ class Job:
     # Como dict y no como ChunkConfig: el trabajo se persiste en JSON, y una
     # dataclass no sobrevive a eso.
     chunking: dict | None = None
+    # Set only for the two jobs of a bundle. `bundle_id` is also the folder
+    # name under output/bundles, which is why no registry is needed.
+    bundle_id: str | None = None
+    bundle_lang: str | None = None
 
     status: str = "queued"       # queued|running|paused|completed|error|cancelled
     phase: str = ""              # el `status` que reporta el downloader
@@ -221,6 +225,9 @@ class QueuePlugin(Plugin):
             # carpeta y se pisarian.
             for job in self._jobs:
                 if job.book_id == book_id and job.status not in DONE_STATES:
+                    if kwargs.get("bundle_id") and not job.bundle_id:
+                        job.bundle_id = kwargs["bundle_id"]
+                        job.bundle_lang = kwargs.get("bundle_lang")
                     return job
 
             job = Job(id=uuid.uuid4().hex[:12], created_at=time.time(), **kwargs)
@@ -406,12 +413,27 @@ class QueuePlugin(Plugin):
             if not cancelled:
                 traceback.print_exc()
             self._save()
+            self._finish_bundle(job)
             return
 
         with self._lock:
             job.status = "completed"
             job.percentage = 100
         self._save()
+        self._finish_bundle(job)
+
+    def _finish_bundle(self, job: Job) -> None:
+        """Hand a finished job to the bundle plugin, if it belongs to one.
+
+        Outside the lock, and it swallows everything: filing a copy away must
+        never be able to fail a download that already succeeded.
+        """
+        if not getattr(job, "bundle_id", None):
+            return
+        try:
+            self.kernel["bundle"].collect(job)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[BUNDLE] no se pudo archivar: {type(exc).__name__}: {exc}")
 
     def _run_book(self, job: Job, report, cancel_check) -> None:
         chunk_config = None
@@ -440,7 +462,13 @@ class QueuePlugin(Plugin):
         )
         with self._lock:
             job.title = result.title or job.title
-            job.files = {k: str(v) for k, v in (result.files or {}).items()}
+            # Lists stay lists: `pdf` is a list of paths when the book was
+            # split per chapter, and str() on it produced "['a', 'b']" --
+            # unusable by anything downstream.
+            job.files = {
+                k: ([str(item) for item in v] if isinstance(v, list) else str(v))
+                for k, v in (result.files or {}).items()
+            }
             job.format_errors = dict(result.errors or {})
 
     def _run_audiobook(self, job: Job, report, cancel_check) -> None:

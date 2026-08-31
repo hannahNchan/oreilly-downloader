@@ -198,14 +198,15 @@ class DownloaderPlugin(Plugin):
         output_plugin = self.kernel["output"]
         translator = self.kernel["translator"]
 
-        # Resolve translation up front so an unreachable Ollama fails loudly
+        # Resolve translation up front so an unreachable service fails loudly
         # here (before doing all the download work) rather than silently.
         translate_enabled = bool(target_lang) and target_lang not in ("original", "en")
         print(f"[TRANSLATE] target_lang={target_lang!r} enabled={translate_enabled}")
         if translate_enabled and not translator.is_available():
             raise RuntimeError(
-                f"Translation to '{target_lang}' requested but the Ollama server at "
-                f"{config.OLLAMA_URL} is not reachable. Start Ollama or pick 'original'."
+                f"Translation to '{target_lang}' requested but the local translation "
+                f"service at {config.TRANSLATOR_URL} is not answering with a loaded "
+                f"model. Start it with services/translator/run.ps1, or pick 'original'."
             )
 
         # Phase 1: Fetch metadata.
@@ -414,9 +415,9 @@ class DownloaderPlugin(Plugin):
 
         # Phase 5.5: Translate.
         #
-        # Deliberately done AFTER every O'Reilly request has completed. A local
-        # LLM takes minutes per chapter, so translating inside the fetch loop
-        # stretched the download over hours — long enough for the session to
+        # Deliberately done AFTER every O'Reilly request has completed.
+        # Translation adds tens of seconds per chapter, and running it inside
+        # the fetch loop stretched a download long enough for the session to
         # expire, at which point O'Reilly answers 200 with a short preview stub
         # and the book silently loses all but the first paragraph per chapter.
         # Fetching everything first keeps all network I/O inside one fresh
@@ -474,10 +475,77 @@ class DownloaderPlugin(Plugin):
                 print(f"[WARN] no se pudo generar '{fmt}': {exc}")
                 traceback.print_exc()
 
+        # Orden de generacion, y es deliberado: Markdown, JSON, texto plano,
+        # PDF y EPUB al final. Los baratos primero, para que un fallo en el PDF
+        # (WeasyPrint es lo lento y lo fragil de la lista) no te deje sin los
+        # tres que ya se podian haber escrito. `formats` solo dice QUE generar;
+        # el ORDEN lo decide esta secuencia, y los porcentajes de `report` van
+        # con ella: si mueves un bloque, renumeralos o la barra retrocede.
+        # Markdown
+        if "markdown" in formats or "md" in formats or "markdown-chapters" in formats:
+            def _make_markdown():
+                report("generating_markdown", 90)
+                md_plugin = self.kernel["markdown"]
+                md_plugin.generate_book(book_info, chapters_data, book_dir)
+                result.files["markdown"] = str(book_dir / "Markdown")
+            guard("markdown", _make_markdown)
+        # JSON
+        if "json" in formats:
+            def _make_json():
+                report("generating_json", 91)
+                json_plugin = self.kernel["json_export"]
+                json_path = json_plugin.generate(
+                    book_dir=book_dir,
+                    book_metadata=book_info,
+                    chapters_data=chapters_data,
+                    include_jsonl="jsonl" in formats,
+                )
+                result.files["json"] = str(json_path)
+            guard("json", _make_json)
+        # Plain text
+        if "plaintext" in formats or "txt" in formats or "plaintext-chapters" in formats:
+            def _make_plaintext():
+                report("generating_plaintext", 92)
+                plaintext_plugin = self.kernel["plaintext"]
+                single_file = "plaintext-chapters" not in formats
+                txt_path = plaintext_plugin.generate(
+                    book_dir=book_dir,
+                    book_metadata=book_info,
+                    chapters_data=chapters_data,
+                    single_file=single_file,
+                )
+                result.files["plaintext"] = str(txt_path)
+            guard("plaintext", _make_plaintext)
+        # PDF
+        if "pdf" in formats or "all" in formats or "pdf-chapters" in formats:
+            def _make_pdf():
+                pdf_plugin = self.kernel["pdf"]
+
+                if "pdf-chapters" in formats:
+                    report("generating_pdf_chapters", 94)
+                    pdf_paths = pdf_plugin.generate_chapters(
+                        book_info=book_info,
+                        chapters=chapters,
+                        output_dir=book_dir,
+                        css_files=css_list,
+                    )
+                    result.files["pdf"] = [str(p) for p in pdf_paths]
+                else:
+                    report("generating_pdf", 94)
+                    pdf_path = pdf_plugin.generate(
+                        book_info=book_info,
+                        chapters=chapters,
+                        toc=toc,
+                        output_dir=book_dir,
+                        css_files=css_list,
+                        cover_image="cover.jpg",
+                    )
+                    result.files["pdf"] = str(pdf_path)
+            guard("pdf", _make_pdf)
         # EPUB
         if "epub" in formats:
             def _make_epub():
-                report("generating_epub", 90)
+                report("generating_epub", 96)
                 epub_plugin = self.kernel["epub"]
                 epub_path = epub_plugin.generate(
                     book_info=book_info,
@@ -489,72 +557,6 @@ class DownloaderPlugin(Plugin):
                 )
                 result.files["epub"] = str(epub_path)
             guard("epub", _make_epub)
-
-        # Markdown
-        if "markdown" in formats or "md" in formats or "markdown-chapters" in formats:
-            def _make_markdown():
-                report("generating_markdown", 92)
-                md_plugin = self.kernel["markdown"]
-                md_plugin.generate_book(book_info, chapters_data, book_dir)
-                result.files["markdown"] = str(book_dir / "Markdown")
-            guard("markdown", _make_markdown)
-
-        # PDF
-        if "pdf" in formats or "all" in formats or "pdf-chapters" in formats:
-            def _make_pdf():
-                pdf_plugin = self.kernel["pdf"]
-
-                if "pdf-chapters" in formats:
-                    report("generating_pdf_chapters", 95)
-                    pdf_paths = pdf_plugin.generate_chapters(
-                        book_info=book_info,
-                        chapters=chapters,
-                        output_dir=book_dir,
-                        css_files=css_list,
-                    )
-                    result.files["pdf"] = [str(p) for p in pdf_paths]
-                else:
-                    report("generating_pdf", 95)
-                    pdf_path = pdf_plugin.generate(
-                        book_info=book_info,
-                        chapters=chapters,
-                        toc=toc,
-                        output_dir=book_dir,
-                        css_files=css_list,
-                        cover_image="cover.jpg",
-                    )
-                    result.files["pdf"] = str(pdf_path)
-            guard("pdf", _make_pdf)
-
-        # Plain text
-        if "plaintext" in formats or "txt" in formats or "plaintext-chapters" in formats:
-            def _make_plaintext():
-                report("generating_plaintext", 96)
-                plaintext_plugin = self.kernel["plaintext"]
-                single_file = "plaintext-chapters" not in formats
-                txt_path = plaintext_plugin.generate(
-                    book_dir=book_dir,
-                    book_metadata=book_info,
-                    chapters_data=chapters_data,
-                    single_file=single_file,
-                )
-                result.files["plaintext"] = str(txt_path)
-            guard("plaintext", _make_plaintext)
-
-        # JSON
-        if "json" in formats:
-            def _make_json():
-                report("generating_json", 97)
-                json_plugin = self.kernel["json_export"]
-                json_path = json_plugin.generate(
-                    book_dir=book_dir,
-                    book_metadata=book_info,
-                    chapters_data=chapters_data,
-                    include_jsonl="jsonl" in formats,
-                )
-                result.files["json"] = str(json_path)
-            guard("json", _make_json)
-
         # TOON
         if "toon" in formats:
             def _make_toon():
@@ -567,7 +569,6 @@ class DownloaderPlugin(Plugin):
                 )
                 result.files["toon"] = str(toon_path)
             guard("toon", _make_toon)
-
         # Chunks
         if "chunks" in formats:
             def _make_chunks():
@@ -608,8 +609,32 @@ class DownloaderPlugin(Plugin):
                 def publish():
                     report("transferring", 98)
                     moved = library.transfer_object(book_dir, book_id, "book")
+                    # Una descarga parcial conserva los formatos que no rehizo.
+                    # Se anuncia: un traspaso que toca la obra ya publicada no
+                    # deberia pasar en silencio.
+                    if moved.get("kept"):
+                        print(f"[LIBRARY] {len(moved['kept'])} archivo(s) de la "
+                              f"version anterior se conservan: "
+                              f"{', '.join(sorted(moved['kept'])[:6])}")
                     library.rebuild_index()
-                    result.output_dir = Path(moved["path"])
+                    new_dir = Path(moved["path"])
+
+                    # transfer_object MUEVE la carpeta, asi que cada ruta de
+                    # result.files apunta a un sitio que ya no existe. Antes
+                    # solo se corregia output_dir, y quien leyera files se
+                    # encontraba rutas muertas sin un solo error que lo dijera:
+                    # el boton Reveal de la UI abria la nada, y el archivado de
+                    # un bundle copiaba cero archivos y los daba por perdidos.
+                    def rehome(value):
+                        if isinstance(value, list):
+                            return [rehome(item) for item in value]
+                        try:
+                            return str(new_dir / Path(value).relative_to(book_dir))
+                        except ValueError:
+                            return value  # fuera de book_dir: no es nuestro
+
+                    result.files = {k: rehome(v) for k, v in result.files.items()}
+                    result.output_dir = new_dir
                     result.files["library_rel"] = moved["rel"]
                 guard("transfer", publish)
 

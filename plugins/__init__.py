@@ -15,6 +15,8 @@ from .chunking import ChunkingPlugin, ChunkConfig
 from .translator import TranslatorPlugin
 from .audiobook import AudiobookPlugin, AudiobookChapter, AudiobookResult
 from .library import LibraryPlugin
+from .editions import EditionsPlugin
+from .bundle import BundlePlugin
 
 # Orchestration and system plugins
 from .output import OutputPlugin
