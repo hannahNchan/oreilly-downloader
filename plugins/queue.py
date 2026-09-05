@@ -220,15 +220,24 @@ class QueuePlugin(Plugin):
     def enqueue(self, **kwargs) -> Job:
         """Anade un trabajo. Si no hay nada corriendo, arranca solo."""
         book_id = kwargs.get("book_id")
+        target_lang = kwargs.get("target_lang") or None
         with self._lock:
             # Duplicados: dos trabajos del mismo libro escribirian en la misma
             # carpeta y se pisarian.
+            #
+            # El idioma entra en la clave. La traduccion automatica de un libro
+            # es OTRA descarga del mismo book_id, en su propia carpeta, y
+            # colapsar las dos dejaba al bundle con un solo trabajo esperando
+            # para siempre una mitad que nunca iba a existir.
             for job in self._jobs:
-                if job.book_id == book_id and job.status not in DONE_STATES:
-                    if kwargs.get("bundle_id") and not job.bundle_id:
-                        job.bundle_id = kwargs["bundle_id"]
-                        job.bundle_lang = kwargs.get("bundle_lang")
-                    return job
+                if job.book_id != book_id or job.status in DONE_STATES:
+                    continue
+                if (job.target_lang or None) != target_lang:
+                    continue
+                if kwargs.get("bundle_id") and not job.bundle_id:
+                    job.bundle_id = kwargs["bundle_id"]
+                    job.bundle_lang = kwargs.get("bundle_lang")
+                return job
 
             job = Job(id=uuid.uuid4().hex[:12], created_at=time.time(), **kwargs)
             self._jobs.append(job)

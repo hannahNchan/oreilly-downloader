@@ -84,7 +84,8 @@ class HtmlProcessorPlugin(Plugin):
                 style.string = style["data-template"]
                 del style["data-template"]
 
-    def wrap_xhtml(self, content: str, css_files: list[str], title: str = "") -> str:
+    def wrap_xhtml(self, content: str, css_files: list[str], title: str = "",
+                   lang: str = "en") -> str:
         css_links = "\n".join(
             f'<link href="{css}" rel="stylesheet" type="text/css"/>'
             for css in css_files
@@ -92,7 +93,7 @@ class HtmlProcessorPlugin(Plugin):
 
         return f'''<?xml version="1.0" encoding="utf-8"?>
 <!DOCTYPE html>
-<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" lang="en" xml:lang="en">
+<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" lang="{lang}" xml:lang="{lang}">
 <head>
 <title>{title}</title>
 {css_links}

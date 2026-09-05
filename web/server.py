@@ -609,15 +609,29 @@ class DownloaderHandler(SimpleHTTPRequestHandler):
 
         index = {}
         for manifest in manifests:
-            for language, entry in (manifest.get("languages") or {}).items():
+            languages = manifest.get("languages") or {}
+            # De donde salio el espanol de este bundle: viaja al item para que
+            # el cintillo pueda distinguir una traduccion automatica de la
+            # edicion publicada.
+            es_source = (languages.get("es") or {}).get("source") or "edition"
+
+            for language, entry in languages.items():
                 book_id = str(entry.get("book_id") or "")
-                if book_id:
-                    index[book_id] = {
-                        "bundle_id": manifest.get("bundle_id"),
-                        "bundle_lang": language,
-                        "bundle_title": manifest.get("title"),
-                        "bundle_complete": bool(manifest.get("complete")),
-                    }
+                if not book_id:
+                    continue
+                # La mitad traducida NO se publica en la biblioteca, y comparte
+                # book_id con el original. Indexarla sobrescribia la entrada del
+                # ingles -- este dict solo tiene book_id por clave -- y la obra
+                # inglesa acababa con el cintillo diciendo "es".
+                if (entry.get("source") or "edition") == "machine":
+                    continue
+                index[book_id] = {
+                    "bundle_id": manifest.get("bundle_id"),
+                    "bundle_lang": language,
+                    "bundle_title": manifest.get("title"),
+                    "bundle_complete": bool(manifest.get("complete")),
+                    "bundle_es_source": es_source,
+                }
 
         for item in items:
             info = index.get(str(item.get("book_id") or ""))
@@ -917,42 +931,117 @@ class DownloaderHandler(SimpleHTTPRequestHandler):
             self._send_json({"error": f"{type(exc).__name__}: {exc}"}, 502)
             return
 
-        # Que falta ya en disco, para no volver a generar lo que esta bien.
-        if result.get("found") and result.get("candidate"):
+        # Sin edicion publicada el bundle TODAVIA es posible, traduciendo. La
+        # UI necesita saber si el traductor esta arriba y, si no lo esta, por
+        # que: un checkbox deshabilitado sin motivo es una pared.
+        result["translator"] = self._translator_state()
+
+        # Que falta ya en disco, para no volver a generar lo que esta bien. Se
+        # calcula igual en los dos casos: la carpeta del bundle sale del titulo
+        # del original, asi que es la misma se traduzca o se baje la edicion.
+        candidate = result.get("candidate")
+        machine = not (result.get("found") and candidate)
+        if machine:
+            source = result.get("source") or {}
+            candidate = {
+                "id": str(source.get("id") or book_id),
+                "title": source.get("title") or "",
+                "language": language,
+            } if source else None
+
+        if candidate:
             try:
                 bundle = self.kernel["bundle"]
-                plan = bundle.plan(result.get("source") or {}, result["candidate"])
+                plan = bundle.plan(result.get("source") or {}, candidate,
+                                   es_source="machine" if machine else "edition")
                 gap = bundle.gap(plan["bundle_id"],
                                  [spec["lang"] for spec in plan["jobs"]])
                 gap["bundle_id"] = plan["bundle_id"]
+                gap["es_source"] = "machine" if machine else "edition"
                 result["bundle"] = gap
             except Exception:  # noqa: BLE001
                 pass  # sin esto el checkbox sigue sirviendo, solo sin detalle
 
         self._send_json(result)
 
+    def _translator_state(self) -> dict:
+        """Puede el traductor local hacer la mitad en espanol, y si no, por que.
+
+        El motivo importa tanto como el si/no. El servicio arranca incluso
+        cuando el modelo falla, justamente para que /health pueda explicarlo, y
+        esa explicacion es lo unico que convierte un boton gris en algo
+        accionable.
+        """
+        from plugins.bundle import MACHINE_LANG
+
+        translator = self.kernel["translator"]
+        try:
+            health = translator.health()
+        except Exception:  # noqa: BLE001
+            health = {}
+
+        model = (health or {}).get("model") or {}
+        available = bool(model.get("loaded"))
+
+        reason = ""
+        if not available:
+            reason = str(model.get("error") or "").strip()
+            if not reason:
+                reason = ("el servicio de traduccion local no responde con el "
+                          "modelo cargado; arrancalo con "
+                          "services/translator/run.ps1")
+
+        return {"available": available, "lang": MACHINE_LANG, "reason": reason}
+
     def _handle_bundle_download(self, book_id: str, data: dict, transfer: bool):
         """Queue both editions of a book as one bundle."""
         from plugins.bundle import BUNDLE_FORMATS
 
         language = (data.get("bundle_language") or "es").strip().lower()
+        es_source = (data.get("bundle_es_source") or "edition").strip().lower()
+        if es_source not in ("edition", "machine", "none"):
+            es_source = "edition"
         match = self.kernel["editions"].counterpart(book_id, language)
 
-        if not match.get("found") or not match.get("candidate"):
+        source = match.get("source") or {
+            "id": book_id, "title": data.get("title") or book_id, "language": "en",
+        }
+
+        if es_source == "none":
+            # Solo ingles. No se consulta el traductor ni se exige contraparte:
+            # que el servicio este caido no puede quitar el feature entero.
+            candidate = {}
+        elif es_source == "machine":
+            # Sin edicion publicada: la mitad en espanol es este MISMO libro
+            # traducido. Mismo book_id, y de ahi salen el sufijo de carpeta y la
+            # clave de cola con idioma -- sin las dos cosas, las dos mitades se
+            # pisarian y la cola devolveria un solo trabajo.
+            state = self._translator_state()
+            if not state["available"]:
+                self._send_json(
+                    {"error": "El traductor local no esta disponible",
+                     "reason": state["reason"]},
+                    409,
+                )
+                return
+            candidate = {
+                "id": book_id,
+                "title": source.get("title") or data.get("title") or book_id,
+                "authors": source.get("authors") or [],
+                "language": language,
+            }
+        elif not match.get("found") or not match.get("candidate"):
             self._send_json(
                 {"error": f"No hay edicion en '{language}' para este libro",
                  "reason": match.get("reason", "")},
                 409,
             )
             return
-
-        source = match.get("source") or {
-            "id": book_id, "title": data.get("title") or book_id, "language": "en",
-        }
-        candidate = match["candidate"]
+        else:
+            candidate = match["candidate"]
 
         bundle = self.kernel["bundle"]
-        plan = bundle.plan(source, candidate)
+        plan = bundle.plan(source, candidate, es_source=es_source)
         bundle.start(plan, source, candidate)
 
         # Solo lo que falta. Aviso honesto: esto NO acorta la descarga de
@@ -979,7 +1068,13 @@ class DownloaderHandler(SimpleHTTPRequestHandler):
                 # in the other edition.
                 skip_images=False,
                 chapters=None,
-                transfer=transfer,
+                # None en la mitad original, el codigo del idioma en la
+                # traducida. Es tambien lo que separa las dos entradas de cola.
+                target_lang=spec.get("target_lang"),
+                # La mitad traducida no se publica en la biblioteca: se queda en
+                # la carpeta del bundle, porque el work_id no lleva idioma y
+                # sobrescribiria al original.
+                transfer=transfer and bool(spec.get("transfer", True)),
                 bundle_id=plan["bundle_id"],
                 bundle_lang=spec["lang"],
             )
@@ -987,13 +1082,15 @@ class DownloaderHandler(SimpleHTTPRequestHandler):
                 "job_id": job.id, "book_id": spec["book_id"],
                 "language": spec["lang"], "title": spec["title"],
                 "formats": list(needed), "job_status": job.status,
+                "source": spec.get("source") or "edition",
+                "target_lang": spec.get("target_lang"),
             })
 
         self._send_json({
             "status": "queued" if jobs else "complete", "bundle": True,
             "bundle_id": plan["bundle_id"], "dir": plan["dir"],
             "score": match.get("score"), "jobs": jobs,
-            "skipped": skipped, "gap": gap,
+            "skipped": skipped, "gap": gap, "es_source": es_source,
         })
 
     def _handle_download(self, data: dict):

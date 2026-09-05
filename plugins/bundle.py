@@ -36,6 +36,10 @@ from .base import Plugin
 # purpose: they are LLM/RAG artefacts, not something you read.
 BUNDLE_FORMATS = ["markdown", "json", "plaintext", "pdf", "epub"]
 
+# Idioma al que traduce el bundle cuando no hay edicion publicada. Uno y no una
+# lista: un bundle es EN + ES por definicion.
+MACHINE_LANG = "es-LATAM"
+
 BUNDLES_DIRNAME = "bundles"
 MANIFEST_NAME = "bundle.json"
 
@@ -51,34 +55,67 @@ class BundlePlugin(Plugin):
     def bundle_dir(self, bundle_id: str) -> Path:
         return self.root() / bundle_id
 
-    def plan(self, source: dict, counterpart: dict) -> dict:
+    def plan(self, source: dict, counterpart: dict,
+             es_source: str = "edition") -> dict:
         """Work out the slug and the two job specs for a bundle.
 
         `source` and `counterpart` are the briefs from the editions plugin.
-        Returns {"bundle_id", "dir", "jobs": [{book_id, title, lang}, ...]}.
+        Returns {"bundle_id", "dir", "jobs": [{book_id, title, lang, ...}, ...]}.
+
+        `es_source` dice de donde sale la mitad que no es el original:
+
+            "edition"  la edicion publicada del catalogo, otro book_id
+            "machine"  este MISMO libro pasado por el traductor local
+            "none"     no hay segunda mitad: solo el original
+
+        No son intercambiables, y de ahi que la procedencia viaje en cada spec y
+        acabe en el manifiesto. Una traduccion humana y una automatica se
+        distinguen al leerlas, pero no al mirar la carpeta seis meses despues.
+
+        Con "none" el plan trae UN job. Un bundle de un solo idioma sigue siendo
+        util -- los cinco formatos juntos, con imagenes, en una carpeta -- y no
+        depender del traductor para eso es justo el punto.
         """
+        machine = es_source == "machine"
+        counterpart = counterpart or {}
         title = (source.get("title") or counterpart.get("title") or "").strip()
         bundle_id = slugify(title or str(source.get("id") or "bundle"))
 
         source_lang = self._short_lang(source.get("language"), "en")
         target_lang = self._short_lang(counterpart.get("language"), "es")
 
+        jobs = [
+            {
+                "book_id": str(source.get("id") or ""),
+                "title": source.get("title") or title,
+                "lang": source_lang,
+                "source": "edition",
+                "target_lang": None,
+                "transfer": True,
+            },
+        ]
+
+        if es_source != "none":
+            jobs.append({
+                "book_id": str(counterpart.get("id") or ""),
+                "title": counterpart.get("title") or title,
+                "lang": target_lang,
+                "source": "machine" if machine else "edition",
+                # El codigo interno del idioma, no el tag BCP 47: es lo que
+                # espera el traductor.
+                "target_lang": MACHINE_LANG if machine else None,
+                # La mitad traducida NO se publica en la biblioteca: se queda
+                # en la carpeta del bundle. Sin esto compartiria work_id con el
+                # original (el digest no lleva idioma) y lo sobrescribiria.
+                "transfer": not machine,
+            })
+
         return {
             "bundle_id": bundle_id,
             "dir": str(self.bundle_dir(bundle_id)),
             "title": title,
-            "jobs": [
-                {
-                    "book_id": str(source.get("id") or ""),
-                    "title": source.get("title") or title,
-                    "lang": source_lang,
-                },
-                {
-                    "book_id": str(counterpart.get("id") or ""),
-                    "title": counterpart.get("title") or title,
-                    "lang": target_lang,
-                },
-            ],
+            "es_source": es_source,
+            "jobs": jobs,
         }
 
     def start(self, plan: dict, source: dict, counterpart: dict) -> dict:
@@ -98,7 +135,9 @@ class BundlePlugin(Plugin):
             "formats": list(BUNDLE_FORMATS),
         })
         languages = manifest.setdefault("languages", {})
-        for spec, brief in zip(plan["jobs"], (source, counterpart)):
+        # zip contra los briefs: con un plan de un solo job (solo ingles) se
+        # queda en el primero, que es exactamente lo que hace falta.
+        for spec, brief in zip(plan["jobs"], (source, counterpart or {})):
             entry = languages.setdefault(spec["lang"], {})
             entry.update({
                 "book_id": spec["book_id"],
@@ -106,8 +145,12 @@ class BundlePlugin(Plugin):
                 "authors": brief.get("authors") or [],
                 "status": entry.get("status") or "queued",
                 "files": entry.get("files") or {},
+                # Lo unico que quedara en disco diciendo si este espanol lo
+                # tradujo una persona o una GPU.
+                "source": spec.get("source") or "edition",
             })
-        manifest["match_score"] = counterpart.get("score")
+        manifest["es_source"] = plan.get("es_source") or "edition"
+        manifest["match_score"] = (counterpart or {}).get("score")
         self._write(directory, manifest)
         return manifest
 

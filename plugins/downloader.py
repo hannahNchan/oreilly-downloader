@@ -10,6 +10,7 @@ from typing import Callable
 import config
 from plugins.base import Plugin
 from plugins.chunking import ChunkConfig
+from plugins.errors import PreviewOnly
 
 
 @dataclass
@@ -240,6 +241,11 @@ class DownloaderPlugin(Plugin):
             book_id=book_id,
             title=book_info.get("title", ""),
             authors=book_info.get("authors"),
+            # Una traduccion del mismo libro es otra descarga del mismo book_id.
+            # Sin sufijo las dos escriben en la misma carpeta: es el mismo motivo
+            # por el que la cola deduplica.
+            suffix=(f"-{config.language_tag(target_lang, fallback='')}"
+                    if translate_enabled else ""),
         )
         oebps = output_plugin.get_oebps_dir(book_dir)
 
@@ -273,10 +279,44 @@ class DownloaderPlugin(Plugin):
                 assets_plugin.download_image(cover_url, images_dir / "cover.jpg")
 
         # Phase 4: Process chapters
-        all_css_urls = set()
+        # url -> el numero que le toca en Styles/StyleNN.css.
+        #
+        # Un dict ordenado y no un set: el numero asignado a una hoja no puede
+        # cambiar a mitad de descarga, y `list(css_index)` mas abajo tiene que
+        # salir en ESE orden para que StyleNN.css sea de verdad la hoja NN.
+        # Con un set, `list()` daba un orden arbitrario y "las primeras N" no
+        # eran las hojas que el capitulo pedia.
+        css_index: dict[str, int] = {}
         all_image_urls = set()
         chapters_data = []
-        chapter_files = []  # (xhtml_filename, path_prefix, title) for translation rewrite
+        # Paginas que llegaron mas cortas de lo esperado y se aceptaron igual.
+        # Se cuentan para decirlo al final en vez de callarlo.
+        paginas_cortas: list[str] = []
+        # El plugin es un singleton: sin esto las cuentas del libro anterior
+        # decidirian sobre este.
+        chapters_plugin.reset_stats()
+        # (xhtml_filename, path_prefix, ch, css_refs) para la reescritura de la
+        # traduccion.
+        #
+        # Las css_refs viajan aqui en vez de recalcularse: el capitulo traducido
+        # tiene que enlazar EXACTAMENTE las mismas hojas que el original, y
+        # recalcularlas era justo la causa del cambio de fuente.
+        #
+        # Y va el dict del capitulo entero, no una copia de su titulo: los
+        # titulos se traducen despues de este bucle, y una copia se quedaria en
+        # ingles. Por referencia, el titulo esta siempre al dia.
+        chapter_files = []
+
+        # Idioma que se declara en cada documento de contenido: el del libro
+        # mientras no se traduzca, el de destino en la reescritura.
+        #
+        # Va en el propio XHTML y no solo en el OPF porque la especificacion de
+        # EPUB dice que el lector NO debe deducir el idioma de un recurso a
+        # partir del package document. Y el atributo no es decorativo: de el
+        # cuelgan la seleccion de glifos del idioma, los selectores :lang() de
+        # la hoja del editor, el silabeo y la voz del lector de pantalla.
+        source_tag = config.language_tag(None, fallback=book_info.get("language") or "en")
+        target_tag = config.language_tag(target_lang, fallback=source_tag)
         total_chapters = len(chapters)
 
         # ETA tracking
@@ -311,8 +351,23 @@ class DownloaderPlugin(Plugin):
             cached = cache_path(filename)
             if cached.is_file() and cached.stat().st_size:
                 raw_html = cached.read_text(encoding="utf-8")
+                # Un capitulo grande que viene de cache tambien vale de patron
+                # de control. Sin esto, reanudar una descarga dejaba a
+                # fetch_content sin referencia con la que comprobar la sesion, y
+                # cualquier pagina legitimamente corta pasaba por avance.
+                chapters_plugin.seed_reference(ch["content_url"], len(raw_html))
             else:
-                raw_html = chapters_plugin.fetch_content(ch["content_url"])
+                try:
+                    raw_html = chapters_plugin.fetch_content(ch["content_url"])
+                except PreviewOnly as exc:
+                    # Ya hubo una ronda con cookies nuevas y sigue igual, asi que
+                    # la sesion no es el problema. Se acepta lo que llego y se
+                    # sigue: perder una pagina de relleno es infinitamente menos
+                    # que perder el libro, que es lo que pasaba antes.
+                    raw_html = getattr(exc, "html", "") or ""
+                    paginas_cortas.append(filename)
+                    print(f"[CHAPTERS] {filename} llego corto y se acepta tal "
+                          f"cual. {exc}")
                 # Escritura a .part + rename: un corte a mitad de escritura no
                 # deja un capitulo truncado que luego se daria por completo.
                 # fetch_content ya rechaza los stubs de preview, asi que aqui
@@ -325,16 +380,26 @@ class DownloaderPlugin(Plugin):
             )
 
             # Collect CSS and image URLs
-            all_css_urls.update(ch["stylesheets"])
+            for css_url in ch["stylesheets"]:
+                css_index.setdefault(css_url, len(css_index))
             for img_url in ch["images"]:
                 all_image_urls.add(img_url)
             for img_url in images:
                 if img_url.startswith("http") or img_url.startswith("/"):
                     all_image_urls.add(img_url)
 
-            # Wrap in XHTML
-            css_refs = [f"{path_prefix}Styles/Style{j:02d}.css" for j in range(len(all_css_urls))]
-            xhtml = html_processor.wrap_xhtml(processed, css_refs, ch["title"])
+            # Wrap in XHTML. Solo LAS SUYAS: antes se emitian "las primeras N
+            # del set", con N creciendo capitulo a capitulo, asi que el capitulo
+            # 1 enlazaba dos hojas y el 50 nueve, y ninguna era necesariamente
+            # la que ese capitulo pedia. dict.fromkeys quita duplicados sin
+            # perder el orden en que el capitulo las declara.
+            css_refs = [
+                f"{path_prefix}Styles/Style{css_index[url]:02d}.css"
+                for url in dict.fromkeys(ch["stylesheets"])
+            ]
+            xhtml = html_processor.wrap_xhtml(
+                processed, css_refs, ch["title"], lang=source_tag
+            )
 
             # Write chapter file
             file_path = oebps / filename
@@ -343,7 +408,7 @@ class DownloaderPlugin(Plugin):
 
             chapters_data.append((ch["filename"], ch["title"], processed))
             # Remember how to re-write this file if we translate later.
-            chapter_files.append((filename, path_prefix, ch["title"]))
+            chapter_files.append((filename, path_prefix, ch, css_refs))
 
             # Calculate ETA based on rolling average
             chapter_time = time.time() - chapter_start_time
@@ -373,7 +438,9 @@ class DownloaderPlugin(Plugin):
                 img_url = f"https://learning.oreilly.com{img_url}"
             image_list.append(img_url)
 
-        css_list = list(all_css_urls)
+        # El orden importa: download_all_css escribe Style{i:02d}.css por el
+        # indice en esta lista, y css_index ya asigno esos mismos numeros.
+        css_list = list(css_index)
         total_assets = len(css_list) + len(image_list)
 
         # Download CSS
@@ -423,6 +490,19 @@ class DownloaderPlugin(Plugin):
         # Fetching everything first keeps all network I/O inside one fresh
         # session; the slow part now runs with no session dependency at all.
         if translate_enabled:
+            # Titulos e indice primero: texto plano, sin marcado, una sola tanda.
+            # Es la parte mas visible del libro y la mas facil de traducir bien,
+            # y dejarla en ingles dentro de un libro en espanol se ve al abrirlo.
+            # El indice se muta en su sitio, asi que esto arregla de una vez el
+            # nav del EPUB, el toc.ncx y el indice del PDF.
+            report("translating_titles", 89, message="Traduciendo titulos e indice")
+            chapter_titles = [ch.get("title") or "" for ch in chapters]
+            for ch, new_title in zip(
+                chapters, translator.translate_texts(chapter_titles, target_lang)
+            ):
+                ch["title"] = new_title
+            translator.translate_toc(toc, target_lang)
+
             translated_data = []
             for i, (filename, title, processed) in enumerate(chapters_data):
                 if check_cancel():
@@ -430,24 +510,29 @@ class DownloaderPlugin(Plugin):
                     raise Exception("Download cancelled by user")
 
                 pct = 90 + int((i / len(chapters_data)) * 5) if chapters_data else 90
+
+                # El titulo ya traducido, leido del dict del capitulo. No de
+                # chapters_data, que se lleno ANTES de traducir: de ahi saldria
+                # el ingles, y ese mismo titulo va al XHTML, al Markdown, al
+                # JSON y al texto plano.
+                xhtml_name, path_prefix, ch_ref, css_refs = chapter_files[i]
+                ch_title = ch_ref.get("title") or title
                 report(
                     "translating_chapters",
                     pct,
                     message=f"Traduciendo capítulo {i + 1}/{len(chapters_data)}",
                     current_chapter=i + 1,
                     total_chapters=len(chapters_data),
-                    chapter_title=title,
+                    chapter_title=ch_title,
                 )
 
                 translated = translator.translate_html(processed, target_lang)
-                translated_data.append((filename, title, translated))
+                translated_data.append((filename, ch_title, translated))
 
                 # Re-write the on-disk XHTML so EPUB/PDF pick up the translation.
-                xhtml_name, path_prefix, ch_title = chapter_files[i]
-                css_refs = [
-                    f"{path_prefix}Styles/Style{j:02d}.css" for j in range(len(css_list))
-                ]
-                xhtml = html_processor.wrap_xhtml(translated, css_refs, ch_title)
+                xhtml = html_processor.wrap_xhtml(
+                    translated, css_refs, ch_title, lang=target_tag
+                )
                 (oebps / xhtml_name).write_text(xhtml, encoding="utf-8")
 
             chapters_data = translated_data
@@ -528,6 +613,7 @@ class DownloaderPlugin(Plugin):
                         chapters=chapters,
                         output_dir=book_dir,
                         css_files=css_list,
+                        language=target_tag,
                     )
                     result.files["pdf"] = [str(p) for p in pdf_paths]
                 else:
@@ -539,6 +625,7 @@ class DownloaderPlugin(Plugin):
                         output_dir=book_dir,
                         css_files=css_list,
                         cover_image="cover.jpg",
+                        language=target_tag,
                     )
                     result.files["pdf"] = str(pdf_path)
             guard("pdf", _make_pdf)
@@ -554,6 +641,7 @@ class DownloaderPlugin(Plugin):
                     output_dir=book_dir,
                     css_files=css_list,
                     cover_image="cover.jpg",
+                    language=target_tag,
                 )
                 result.files["epub"] = str(epub_path)
             guard("epub", _make_epub)
@@ -637,6 +725,31 @@ class DownloaderPlugin(Plugin):
                     result.output_dir = new_dir
                     result.files["library_rel"] = moved["rel"]
                 guard("transfer", publish)
+
+        # Veredicto. Publicar un libro de avances como si estuviera completo es
+        # peor que fallar: se ve bien en la biblioteca, ocupa su sitio, y no lo
+        # descubres hasta que lo abres. Medido en el caso real: capitulos de 800
+        # bytes y 23 KB de texto para el libro entero, marcado "completed".
+        cortas = len(chapters_plugin.short_accepted)
+        completas = chapters_plugin.full_pages
+        if cortas and completas == 0:
+            # Con CERO paginas sanas no se puede distinguir la causa desde aqui,
+            # asi que se dicen las dos en vez de inventar una. Lo que si es
+            # seguro es que no hay libro que publicar.
+            raise RuntimeError(
+                f"Ninguna de las {cortas} paginas de este libro llego completa: "
+                f"todas eran avances. O la sesion dejo de servir contenido a "
+                f"mitad de la descarga, o este libro no esta disponible completo "
+                f"con esta cuenta. No se genera nada, porque un EPUB de avances "
+                f"parece correcto y no lo es."
+            )
+        if cortas > completas:
+            print(f"[CHAPTERS] AVISO: {cortas} pagina(s) llegaron cortas frente "
+                  f"a {completas} completas. El libro puede estar incompleto.")
+
+        if paginas_cortas:
+            print(f"[CHAPTERS] {len(paginas_cortas)} pagina(s) llegaron cortas y "
+                  f"se aceptaron: {', '.join(paginas_cortas[:5])}")
 
         report("completed", 100)
         return result

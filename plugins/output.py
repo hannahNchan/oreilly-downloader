@@ -47,6 +47,7 @@ class OutputPlugin(Plugin):
         book_id: str,
         title: str,
         authors: list[str] | None = None,
+        suffix: str = "",
     ) -> Path:
         """Create a book output directory with conflict resolution."""
         # Build folder name with fallback chain
@@ -62,6 +63,11 @@ class OutputPlugin(Plugin):
         # justo cuando el token de O'Reilly dura minutos. La descarga se hace en
         # disco local y se publica despues con library.transfer_object().
         folder_name = slugify(folder_title)
+        # Sufijo de idioma para una traduccion automatica. Mismo book_id y mismo
+        # titulo que el original, asi que sin el las dos descargas compartirian
+        # carpeta y la segunda pisaria a la primera.
+        if suffix:
+            folder_name = f"{folder_name}{suffix}"
         book_dir = output_dir / folder_name
 
         # Handle same-title-different-book conflicts

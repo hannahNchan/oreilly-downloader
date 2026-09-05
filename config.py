@@ -104,6 +104,50 @@ NLLB_TARGET_LANGS = {
     "es-LATAM": "spa_Latn",
 }
 
+# code -> BCP 47, que es lo que hablan EPUB y XHTML.
+#
+# "es-LATAM" es NUESTRO codigo y no es un tag legal: una subetiqueta de region
+# son dos o tres letras, o tres digitos, y "LATAM" tiene cinco. Declararlo tal
+# cual metia un tag invalido en cada documento de contenido.
+#
+# "es" y no "es-419" a proposito. Tipograficamente son identicos -- mismo
+# silabeo, mismos glifos -- y un lector que busque su diccionario de silabeo por
+# coincidencia exacta encuentra "es" y puede no encontrar "es-419". El matiz
+# latinoamericano vive en la lista de post-edicion, no en la tipografia.
+BCP47_TAGS = {
+    "es-LATAM": "es",
+}
+
+
+def _clean_tag(value: str) -> str:
+    """Lo que quede de `value` que pueda aparecer legalmente en un tag BCP 47."""
+    raw = str(value or "").strip().lower().split("-")
+    primary = "".join(c for c in raw[0] if c.isalpha())[:3]
+    if not primary:
+        return ""
+    if len(raw) > 1:
+        region = "".join(c for c in raw[1] if c.isalnum())
+        # Region legal = 2-3 letras o 3 digitos. Cualquier otra cosa se descarta
+        # en lugar de emitir un tag invalido.
+        if len(region) in (2, 3):
+            return f"{primary}-{region.upper()}"
+    return primary
+
+
+def language_tag(code: str | None, fallback: str = "en") -> str:
+    """Nuestro codigo interno de idioma -> un tag BCP 47 legal.
+
+    `fallback` es el idioma propio del libro: la unica respuesta honesta para
+    contenido que no se ha traducido.
+    """
+    if code and code not in ("original", "en"):
+        if code in BCP47_TAGS:
+            return BCP47_TAGS[code]
+        cleaned = _clean_tag(code)
+        if cleaned:
+            return cleaned
+    return _clean_tag(fallback) or "en"
+
 HEADERS = {
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
     "Accept-Encoding": "gzip, deflate",

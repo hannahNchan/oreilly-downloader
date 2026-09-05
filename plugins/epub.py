@@ -18,6 +18,7 @@ class EpubPlugin(Plugin):
         output_dir: Path,
         css_files: list[str],
         cover_image: str | None = None,
+        language: str | None = None,
     ) -> Path:
         oebps = output_dir / "OEBPS"
         oebps.mkdir(parents=True, exist_ok=True)
@@ -25,9 +26,10 @@ class EpubPlugin(Plugin):
 
         self._write_mimetype(output_dir)
         self._write_container_xml(output_dir)
-        self._write_content_opf(oebps, book_info, chapters, css_files, cover_image)
-        self._write_toc_ncx(oebps, book_info, toc)
-        self._write_nav_xhtml(oebps, book_info, toc)
+        self._write_content_opf(oebps, book_info, chapters, css_files, cover_image,
+                                language)
+        self._write_toc_ncx(oebps, book_info, toc, language)
+        self._write_nav_xhtml(oebps, book_info, toc, language)
 
         # Use sanitized title for epub filename
         epub_name = sanitize_filename(book_info.get("title", book_info["id"]))
@@ -71,13 +73,18 @@ class EpubPlugin(Plugin):
         chapters: list[dict],
         css_files: list[str],
         cover_image: str | None,
+        language: str | None = None,
     ):
         title = html.escape(book_info.get("title", "Unknown"))
         authors = book_info.get("authors", [])
         isbn = book_info.get("isbn", book_info.get("id", "unknown"))
         description = html.escape(book_info.get("description", "")[:500])
         publishers = book_info.get("publishers", [])
-        language = book_info.get("language", "en")
+        # El idioma del CONTENIDO, que no es el del catalogo cuando se ha
+        # traducido. La especificacion exige al menos un dc:language, y un EPUB
+        # en espanol que se declara ingles miente al lector: silabeo, glifos
+        # del idioma y voz del lector de pantalla cuelgan de aqui.
+        language = language or book_info.get("language", "en")
         pub_date = book_info.get("publication_date", "")
 
         author_xml = ""
@@ -143,7 +150,7 @@ class EpubPlugin(Plugin):
         modified_timestamp = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
 
         content = f'''<?xml version="1.0" encoding="utf-8"?>
-<package xmlns="http://www.idpf.org/2007/opf" unique-identifier="bookid" version="3.0">
+<package xmlns="http://www.idpf.org/2007/opf" unique-identifier="bookid" version="3.0" xml:lang="{language}">
   <metadata xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/">
     <dc:title>{title}</dc:title>
 {author_xml}{publisher_xml}    <dc:description>{description}</dc:description>
@@ -162,7 +169,9 @@ class EpubPlugin(Plugin):
 
         write_text_utf8(oebps / "content.opf", content)
 
-    def _write_toc_ncx(self, oebps: Path, book_info: dict, toc: list[dict]):
+    def _write_toc_ncx(self, oebps: Path, book_info: dict, toc: list[dict],
+                       language: str | None = None):
+        language = language or book_info.get("language", "en")
         title = html.escape(book_info.get("title", "Unknown"))
         isbn = book_info.get("isbn", book_info.get("id", "unknown"))
         authors = ", ".join(book_info.get("authors", ["Unknown"]))
@@ -176,6 +185,7 @@ class EpubPlugin(Plugin):
   <head>
     <meta content="ID:ISBN:{isbn}" name="dtb:uid"/>
     <meta content="{max_depth}" name="dtb:depth"/>
+    <meta content="{language}" name="dtb:language"/>
     <meta content="0" name="dtb:totalPageCount"/>
     <meta content="0" name="dtb:maxPageNumber"/>
   </head>
@@ -192,20 +202,33 @@ class EpubPlugin(Plugin):
 
         write_text_utf8(oebps / "toc.ncx", content)
 
-    def _write_nav_xhtml(self, oebps: Path, book_info: dict, toc: list[dict]):
+    # La cabecera del nav no es contenido del libro, es nuestra. Un mapa y no
+    # una llamada al modelo: tres palabras deterministas valen mas que tres
+    # palabras traducidas de una en una y sin contexto.
+    NAV_HEADING = {
+        "en": "Table of Contents",
+        "es": "Tabla de contenidos",
+    }
+
+    def _write_nav_xhtml(self, oebps: Path, book_info: dict, toc: list[dict],
+                         language: str | None = None):
         """Generate EPUB 3 navigation document (nav.xhtml)."""
+        language = language or book_info.get("language", "en")
+        nav_heading = self.NAV_HEADING.get(
+            str(language).split("-")[0].lower(), self.NAV_HEADING["en"]
+        )
         title = html.escape(book_info.get("title", "Unknown"))
         nav_items = self._build_nav_ol(toc)
 
         content = f'''<?xml version="1.0" encoding="utf-8"?>
 <!DOCTYPE html>
-<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops">
+<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" lang="{language}" xml:lang="{language}">
 <head>
   <title>{title}</title>
 </head>
 <body>
   <nav epub:type="toc" id="toc">
-    <h1>Table of Contents</h1>
+    <h1>{nav_heading}</h1>
     <ol>
 {nav_items}
     </ol>

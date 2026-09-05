@@ -170,6 +170,7 @@ class PdfPlugin(Plugin):
         output_dir: Path,
         css_files: list[str],
         cover_image: str | None = None,
+        language: str | None = None,
     ) -> Path:
         """
         Generate a single PDF containing all chapters.
@@ -195,6 +196,7 @@ class PdfPlugin(Plugin):
             oebps=oebps,
             css_files=css_files,
             cover_image=cover_image,
+            language=language,
         )
 
         title = book_info.get("title", "book")
@@ -211,6 +213,7 @@ class PdfPlugin(Plugin):
         chapters: list[dict],
         output_dir: Path,
         css_files: list[str],
+        language: str | None = None,
     ) -> list[Path]:
         """
         Generate individual PDF files for each chapter.
@@ -232,6 +235,9 @@ class PdfPlugin(Plugin):
         # Load CSS
         print_css = self._get_print_css()
         original_css = self._load_css_files(oebps, css_files)
+        # WeasyPrint silabea por idioma: sin lang aplica las reglas del ingles a
+        # un texto espanol y parte las palabras donde no debe.
+        lang = language or book_info.get("language") or "en"
 
         pdf_paths = []
 
@@ -244,7 +250,7 @@ class PdfPlugin(Plugin):
             chapter_title = self._escape_html(chapter.get("title", f"Chapter {i+1}"))
 
             chapter_html = f'''<!DOCTYPE html>
-<html>
+<html lang="{lang}">
 <head>
     <meta charset="utf-8">
     <title>{chapter_title}</title>
@@ -277,10 +283,12 @@ class PdfPlugin(Plugin):
         oebps: Path,
         css_files: list[str],
         cover_image: str | None,
+        language: str | None = None,
     ) -> str:
         """Build single HTML document combining all chapters."""
         print_css = self._get_print_css()
         original_css = self._load_css_files(oebps, css_files)
+        lang = language or book_info.get("language") or "en"
 
         # Un <img> a un archivo que no existe no falla: WeasyPrint pinta el
         # texto alternativo, y la portada acaba siendo la palabra "Cover" sobre
@@ -339,7 +347,7 @@ class PdfPlugin(Plugin):
         title = self._escape_html(book_info.get("title", "Untitled"))
 
         return f'''<!DOCTYPE html>
-<html>
+<html lang="{lang}">
 <head>
     <meta charset="utf-8">
     <title>{title}</title>

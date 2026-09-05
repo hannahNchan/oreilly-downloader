@@ -2175,3 +2175,30 @@ body.batch-open { overflow: hidden; }
 @media (prefers-reduced-motion: reduce) {
     .bundle-fmt-bar--active::after { animation: none; }
 }
+
+/* Cintillo de un bundle cuyo espanol es traduccion automatica. Otro color y no
+   solo otro texto: la diferencia entre una traduccion profesional y una de
+   maquina merece verse desde la rejilla, sin leer el tooltip. */
+.bundle-ribbon.is-machine {
+    background: #b45309;
+}
+.dark .bundle-ribbon.is-machine {
+    background: #d97706;
+}
+
+/* Marca de bundle en la modal generica de descargas. Es un boton porque lleva
+   de vuelta a la ventana del bundle, no solo informa. */
+.batch-bundle-tag {
+    font-size: .625rem;
+    font-weight: 600;
+    letter-spacing: .04em;
+    padding: .125rem .375rem;
+    margin-right: .5rem;
+    border: 0;
+    border-radius: .25rem;
+    background: #e8f4fc;
+    color: #005bb5;
+    cursor: pointer;
+}
+.batch-bundle-tag:hover { background: #d3e9f9; }
+.dark .batch-bundle-tag { background: rgba(0, 115, 230, .18); color: #7cc0ff; }

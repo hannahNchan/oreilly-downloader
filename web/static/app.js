@@ -693,13 +693,19 @@ function libraryTile(item) {
     // Cintillo de bundle: esta obra se bajo emparejada con su otra edicion.
     // El tooltip dice cual es el par y donde quedo, porque el cintillo solo no
     // explica nada a las dos semanas.
+    // Y si el español es automático, el cintillo lo dice: al mes no hay forma
+    // de saber si aquel EPUB lo tradujo una persona o una GPU.
+    const bundleMachine = item.bundle_es_source === 'machine';
     const bundleRibbon = item.bundle_id
-        ? '<span class="bundle-ribbon" title="'
+        ? '<span class="bundle-ribbon' + (bundleMachine ? ' is-machine' : '') + '" title="'
           + 'Parte de un bundle: ' + (item.bundle_title || item.bundle_id)
           + ' (' + (BUNDLE_LANG_LABEL[item.bundle_lang] || item.bundle_lang || '') + ')'
           + (item.bundle_complete ? ' - las dos ediciones completas' : ' - la otra edicion aun no termina')
+          + (bundleMachine
+             ? '. El espanol es una traduccion automatica del traductor local, no la edicion publicada'
+             : '')
           + '. En output/bundles/' + item.bundle_id
-          + '">BUNDLE</span>'
+          + '">' + (bundleMachine ? 'BUNDLE &middot; IA' : 'BUNDLE') + '</span>'
         : '';
 
     // Un audiolibro a medias se ve desde la rejilla, sin tener que abrirlo.
@@ -1923,6 +1929,16 @@ function createBookCardHTML(book) {
                     </span>
                 </label>
 
+                <!-- Fuera del <label> a proposito: un select dentro de la
+                     etiqueta del checkbox lo conmutaria al hacer clic. Y select
+                     en vez de radios porque los radios comparten \`name\` en
+                     toda la pagina, y eso ya nos costo una descarga. -->
+                <div class="bundle-source book-only hidden pl-6 pb-1">
+                    <label class="text-xs text-zinc-500">Español:
+                        <select class="bundle-es-select text-xs border border-zinc-200 rounded px-1.5 py-1 ml-1 text-zinc-700 bg-white"></select>
+                    </label>
+                </div>
+
                 <!-- Va en el cuerpo de la modal, NO dentro de Advanced Options:
                      se decide en cada descarga, asi que tiene que verse sin
                      desplegar nada. Solo para libros; un audiolibro no tiene
@@ -2151,6 +2167,8 @@ const BUNDLE_LANG_LABEL = { en: 'Inglés', es: 'Español' };
 const BUNDLE_FMT_LABEL = {
     markdown: 'Markdown', json: 'JSON', plaintext: 'Plain Text',
     pdf: 'PDF', epub: 'EPUB',
+    // Pseudo-formato: solo existe en la mitad traducida.
+    translation: 'Traducción',
 };
 
 function bundleFormatList(codes) {
@@ -2160,7 +2178,9 @@ function bundleFormatList(codes) {
 const BUNDLE_STATUS_TEXT = {
     queued: 'En cola',
     running: 'Descargando',
-    paused: 'Pausado (sesión expirada)',
+    // Sin afirmar la causa: el mismo estado lo produce una sesion caida y una
+    // pagina que solo PARECE truncada, y el motivo real viaja en job.message.
+    paused: 'Pausado',
     completed: 'Completado',
     error: 'Error',
     cancelled: 'Cancelado',
@@ -2184,6 +2204,33 @@ const BUNDLE_PHASE_FMT = {
 };
 // Fases posteriores a los cinco formatos: si el job esta aqui, ya salieron.
 const BUNDLE_PHASE_AFTER = ['generating_toon', 'generating_chunks', 'transferring'];
+
+// Traduccion. Va ANTES de los formatos y se come casi todo el tiempo: sin una
+// fila propia, las cinco barras de formato se quedarian a 0% durante media hora
+// sin explicar por que.
+const BUNDLE_PHASE_TRANSLATING = ['translating_titles', 'translating_chapters'];
+
+/* Estado de la fila de Traduccion. A diferencia de las de formato, esta SI
+   lleva un numero real: el trabajo publica el capitulo por el que va, asi que no
+   hay que inventarse una animacion indeterminada. */
+function bundleTranslationState(job) {
+    if (!job) return { key: 'pending', label: 'En espera', fill: 0 };
+    if (job.status === 'completed') return { key: 'done', label: 'Listo', fill: 100 };
+    if (job.status === 'error' || job.status === 'cancelled') {
+        return { key: 'stopped', label: 'Sin hacer', fill: 0 };
+    }
+    if (BUNDLE_PHASE_TRANSLATING.includes(job.phase)) {
+        const total = job.total_chapters || 0;
+        const pct = total ? Math.round((job.current_chapter / total) * 100) : 0;
+        return { key: 'active', label: pct + '%', fill: pct, quantitative: true };
+    }
+    // Cualquier fase de generacion va despues de traducir, asi que si estamos
+    // en una, la traduccion ya termino.
+    if (BUNDLE_PHASE_FMT[job.phase] || BUNDLE_PHASE_AFTER.includes(job.phase)) {
+        return { key: 'done', label: 'Listo', fill: 100 };
+    }
+    return { key: 'pending', label: 'En espera', fill: 0 };
+}
 
 const BUNDLE_FMT_STYLE = {
     kept:    { bar: 'bg-zinc-300',     text: 'text-zinc-400' },
@@ -2233,7 +2280,9 @@ function paintBundleFormats(section, job) {
     const kept = section._kept || [];
     section.querySelectorAll('.bundle-fmt').forEach(function (row) {
         const fmt = row.dataset.fmt;
-        const state = bundleFormatState(job, fmt, kept.includes(fmt));
+        const state = fmt === 'translation'
+            ? bundleTranslationState(job)
+            : bundleFormatState(job, fmt, kept.includes(fmt));
         const style = BUNDLE_FMT_STYLE[state.key] || BUNDLE_FMT_STYLE.pending;
 
         const bar = row.querySelector('.bundle-fmt-bar');
@@ -2243,7 +2292,12 @@ function paintBundleFormats(section, job) {
                       // Indeterminada a proposito: el downloader no publica el
                       // avance DENTRO de un formato, solo cual esta haciendo.
                       // Una barra que se llenara sola estaria inventando.
-                      + (state.key === 'active' ? ' bundle-fmt-bar--active' : '');
+                      //
+                      // La de traduccion es la excepcion: ahi hay capitulo
+                      // actual y total, asi que la barra dice la verdad y el
+                      // barrido solo distraeria.
+                      + (state.key === 'active' && !state.quantitative
+                         ? ' bundle-fmt-bar--active' : '');
 
         const label = row.querySelector('.bundle-fmt-state');
         label.className = 'bundle-fmt-state text-[0.6875rem] ' + style.text;
@@ -2264,6 +2318,7 @@ function bundleSection(spec) {
       +   '<span class="bundle-sec-pct text-xs font-medium text-zinc-500">0%</span>'
       + '</div>'
       + '<p class="bundle-sec-title text-sm font-medium text-zinc-700 mt-0.5"></p>'
+      + '<p class="bundle-sec-src text-[0.6875rem] mt-0.5"></p>'
       + '<div class="h-1.5 bg-zinc-100 rounded-full overflow-hidden mt-2">'
       +   '<div class="bundle-sec-bar h-full bg-oreilly-blue rounded-full transition-all duration-300" style="width:0%"></div>'
       + '</div>'
@@ -2274,6 +2329,15 @@ function bundleSection(spec) {
     section.querySelector('.bundle-sec-lang').textContent =
         BUNDLE_LANG_LABEL[spec.language] || String(spec.language || '').toUpperCase();
     section.querySelector('.bundle-sec-title').textContent = spec.title || '';
+
+    // La procedencia se enseña siempre, no solo cuando es automatica: si no se
+    // dice de las dos, el silencio no significa nada.
+    const src = section.querySelector('.bundle-sec-src');
+    src.textContent = spec.machine
+        ? '\u26a0 traducido por el traductor local'
+        : 'edición publicada';
+    src.className = 'bundle-sec-src text-[0.6875rem] mt-0.5 '
+        + (spec.machine ? 'text-amber-600' : 'text-zinc-400');
     if (spec.formats && spec.formats.length) {
         section.querySelector('.bundle-sec-msg').textContent =
             'En cola · ' + bundleFormatList(spec.formats);
@@ -2284,7 +2348,10 @@ function bundleSection(spec) {
     }
 
     const list = section.querySelector('.bundle-fmt-list');
-    BUNDLE_FMT_ORDER.forEach(function (fmt) {
+    const filas = spec.machine
+        ? ['translation'].concat(BUNDLE_FMT_ORDER)
+        : BUNDLE_FMT_ORDER;
+    filas.forEach(function (fmt) {
         const row = document.createElement('div');
         row.className = 'bundle-fmt';
         row.dataset.fmt = fmt;
@@ -2341,12 +2408,14 @@ function openBundleModal(result) {
         return {
             job_id: j.job_id, language: j.language, title: j.title,
             formats: j.formats, kept: have[j.language] || [],
+            machine: j.source === 'machine',
         };
     });
     skipped.forEach(function (sk) {
         specs.push({
             job_id: '', language: sk.language, title: sk.title,
             formats: [], kept: have[sk.language] || BUNDLE_FMT_ORDER.slice(),
+            machine: result.es_source === 'machine' && sk.language !== 'en',
         });
     });
     // Ingles primero, como en la carpeta.
@@ -2368,6 +2437,43 @@ function openBundleModal(result) {
     if (!jobs.length) return;
     bundlePoll.timer = setInterval(refreshBundleModal, 1000);
     refreshBundleModal();
+}
+
+/* Vuelve a abrir la ventana de un bundle que ya esta en marcha.
+
+   La modal solo se abria al lanzar la descarga, asi que si la cerrabas o
+   recargabas la pagina el bundle seguia bajando sin forma de volver a verlo. Se
+   reconstruye desde /api/queue, que ya lleva bundle_id y bundle_lang en cada
+   trabajo. */
+async function reopenBundleModal(bundleId) {
+    if (!bundleId) return;
+    let snap;
+    try {
+        snap = await (await fetch(`${API}/api/queue`)).json();
+    } catch (err) {
+        return;   // sin cola no hay nada que enseñar
+    }
+
+    const jobs = (snap.jobs || []).filter(function (j) {
+        return j.bundle_id === bundleId;
+    });
+    if (!jobs.length) return;
+
+    const machine = jobs.some(function (j) { return !!j.target_lang; });
+    openBundleModal({
+        bundle_id: bundleId,
+        dir: '',
+        jobs: jobs.map(function (j) {
+            return {
+                job_id: j.id, book_id: j.book_id, language: j.bundle_lang,
+                title: j.title, formats: j.formats || [],
+                source: j.target_lang ? 'machine' : 'edition',
+            };
+        }),
+        skipped: [],
+        gap: {},
+        es_source: machine ? 'machine' : 'edition',
+    });
 }
 
 function closeBundleModal() {
@@ -2420,6 +2526,11 @@ async function refreshBundleModal() {
             if (job.message) parts.push(job.message);
         } else if (job.error) {
             parts.push(job.error);
+        } else if (job.message) {
+            // Un trabajo pausado no tiene `error`, pero si `message`, con el
+            // motivo de verdad. Antes se descartaba y quedaba la etiqueta
+            // genérica, que es como se acaba culpando a la sesión sin pruebas.
+            parts.push(job.message);
         }
         section.querySelector('.bundle-sec-msg').textContent = parts.filter(Boolean).join(' · ');
 
@@ -2515,6 +2626,110 @@ function setBundleLock(cardElement, locked) {
  * Por eso el título emparejado se muestra siempre — un bundle armado con el
  * libro equivocado es peor que no tener bundle.
  */
+/* Que vas a bajar con el modo elegido. Tres textos y no uno: la diferencia
+   entre una traduccion publicada, una automatica y no tener español es
+   justamente lo que hay que decir antes de darle a Descargar. */
+function describeBundleSource(cardElement, value, data) {
+    const note = cardElement.querySelector('.bundle-note');
+    const match = cardElement.querySelector('.bundle-match');
+    const translator = data.translator || {};
+
+    if (value === 'edition' && data.candidate) {
+        note.textContent = 'Los 5 formatos en inglés y español, con imágenes.';
+        const pct = Math.round((data.score || 0) * 100);
+        let line = `Emparejado con: ${data.candidate.title} (${pct}%)`;
+        // El aviso importa mas que el porcentaje: un titulo identico al
+        // original suele ser la misma obra listada dos veces, y el bundle
+        // bajaria el mismo libro dos veces sin que se note.
+        if (data.warning) line += ` — ${data.warning}`;
+        match.textContent = line;
+        match.className = 'bundle-match block text-xs '
+            + (data.confident ? 'text-emerald-600' : 'text-amber-600');
+    } else if (value === 'machine') {
+        note.textContent = 'Los 5 formatos en inglés, y en español traducido '
+            + 'por el traductor local.';
+        match.textContent = 'Traducción automática: calidad por debajo de una '
+            + 'edición publicada, usa la GPU, y el libro se descarga entero '
+            + 'otra vez para traducirlo.';
+        match.className = 'bundle-match block text-xs text-amber-600';
+    } else {
+        note.textContent = 'Los 5 formatos, sólo en inglés, con imágenes.';
+        if (data.found) {
+            match.textContent = 'Hay edición en español, pero has elegido no bajarla.';
+        } else if (translator.available) {
+            match.textContent = 'No hay edición en español en el catálogo.';
+        } else {
+            match.textContent = 'No hay edición en español, y el traductor '
+                + 'local no está disponible.';
+        }
+        match.className = 'bundle-match block text-xs text-zinc-400';
+    }
+
+    applyBundleGap(data.bundle, note);
+}
+
+/* Puebla el select con lo que de verdad hay disponible.
+
+   El orden es el de preferencia: edicion publicada > traduccion > solo ingles,
+   y el primero queda elegido. "Solo inglés" esta SIEMPRE, para que ni la falta
+   de edicion ni un traductor apagado puedan quitar el feature. */
+function setBundleSourceOptions(cardElement, data) {
+    const wrap = cardElement.querySelector('.bundle-source');
+    const select = cardElement.querySelector('.bundle-es-select');
+    if (!wrap || !select) return;
+
+    const opciones = [];
+    if (data.found && data.candidate) {
+        opciones.push(['edition', 'Edición publicada']);
+    }
+    if ((data.translator || {}).available) {
+        opciones.push(['machine', 'Traducir con el traductor local']);
+    }
+    opciones.push(['none', 'Sólo inglés']);
+
+    select.innerHTML = '';
+    opciones.forEach(function (opt) {
+        const el = document.createElement('option');
+        el.value = opt[0];
+        el.textContent = opt[1];
+        select.appendChild(el);
+    });
+    select.value = opciones[0][0];
+    wrap.classList.remove('hidden');
+
+    cardElement.dataset.bundleEsSource = select.value;
+    select.onchange = function () {
+        cardElement.dataset.bundleEsSource = select.value;
+        describeBundleSource(cardElement, select.value, data);
+    };
+    describeBundleSource(cardElement, select.value, data);
+}
+
+/* Que falta de verdad, leido del disco. Sin esto la casilla promete diez
+   archivos aunque ocho ya esten ahi. Extraido porque ahora hay dos caminos que
+   llegan aqui: la edicion publicada y la traduccion. */
+function applyBundleGap(gap, note) {
+    if (!gap || !gap.exists || !gap.total) return;
+    if (gap.complete) {
+        note.textContent = `Ya está completo: ${gap.have_count}/${gap.total} `
+            + 'archivos. No hay nada que descargar.';
+        return;
+    }
+    if (gap.have_count <= 0) return;
+
+    const parts = [];
+    ['en', 'es'].forEach(function (lang) {
+        const falta = (gap.missing || {})[lang] || [];
+        if (falta.length) {
+            parts.push(`${bundleFormatList(falta)} (${BUNDLE_LANG_LABEL[lang] || lang})`);
+        }
+    });
+    note.textContent = `Ya tienes ${gap.have_count}/${gap.total}. `
+        + `Sólo se generará: ${parts.join(' · ')}. `
+        + 'El libro se descarga entero igual: los capítulos hacen falta para '
+        + 'generar cualquier formato.';
+}
+
 async function checkBundleAvailability(cardElement, bookId) {
     const label = cardElement.querySelector('.bundle-option');
     const box = cardElement.querySelector('.bundle-toggle');
@@ -2529,6 +2744,8 @@ async function checkBundleAvailability(cardElement, bookId) {
     note.textContent = 'Buscando edición en español…';
     match.textContent = '';
     setBundleLock(cardElement, false);
+    const sourceWrap = cardElement.querySelector('.bundle-source');
+    if (sourceWrap) sourceWrap.classList.add('hidden');
 
     // Marcar como imágenes obligatorias mientras el bundle esté activo: un
     // bundle promete las ilustraciones, así que las dos opciones se excluyen.
@@ -2541,48 +2758,24 @@ async function checkBundleAvailability(cardElement, bookId) {
         // La tarjeta pudo cerrarse o cambiar mientras buscábamos.
         if (!cardElement.classList.contains('expanded')) return;
 
-        if (!data.found || !data.candidate) {
-            note.textContent = data.reason || 'No hay edición en español de este libro.';
-            return;
-        }
-
+        // El checkbox se habilita SIEMPRE. Que no haya edición en español, o
+        // que el traductor esté apagado, sólo quita opciones del select: un
+        // bundle de un solo idioma sigue siendo útil, y bloquear el feature
+        // entero por un servicio caído era justo lo que no debía pasar.
         box.disabled = false;
         label.classList.remove('opacity-60', 'cursor-not-allowed');
         label.classList.add('cursor-pointer');
-        note.textContent = 'Los 5 formatos en inglés y español, con imágenes.';
 
-        const pct = Math.round((data.score || 0) * 100);
-        let line = `Emparejado con: ${data.candidate.title} (${pct}%)`;
-        // El aviso importa mas que el porcentaje: un titulo identico al
-        // original suele ser la misma obra listada dos veces, y el bundle
-        // bajaria el mismo libro dos veces sin que se note.
-        if (data.warning) line += ` — ${data.warning}`;
-        match.textContent = line;
-        match.className = 'bundle-match block text-xs '
-            + (data.confident ? 'text-emerald-600' : 'text-amber-600');
-
-        // Que falta de verdad, leido del disco. Sin esto la casilla promete
-        // diez archivos aunque ocho ya esten ahi.
-        const gap = data.bundle;
-        if (gap && gap.exists && gap.total) {
-            if (gap.complete) {
-                note.textContent = `Ya está completo: ${gap.have_count}/${gap.total} archivos. No hay nada que descargar.`;
-            } else if (gap.have_count > 0) {
-                const parts = [];
-                ['en', 'es'].forEach(function (lang) {
-                    const falta = (gap.missing || {})[lang] || [];
-                    if (falta.length) {
-                        parts.push(`${bundleFormatList(falta)} (${BUNDLE_LANG_LABEL[lang] || lang})`);
-                    }
-                });
-                note.textContent = `Ya tienes ${gap.have_count}/${gap.total}. `
-                    + `Sólo se generará: ${parts.join(' · ')}. `
-                    + 'El libro se descarga entero igual: los capítulos hacen falta para generar cualquier formato.';
-            }
-        }
+        setBundleSourceOptions(cardElement, data);
     } catch (err) {
         if (!cardElement.classList.contains('expanded')) return;
+        // Ni un fallo de red quita el bundle: queda "sólo inglés", que no
+        // necesita saber nada del catálogo ni del traductor.
         note.textContent = 'No se pudo comprobar la edición en español.';
+        box.disabled = false;
+        label.classList.remove('opacity-60', 'cursor-not-allowed');
+        label.classList.add('cursor-pointer');
+        setBundleSourceOptions(cardElement, { found: false, translator: {} });
     }
 }
 
@@ -2855,6 +3048,11 @@ async function download(cardElement) {
             // navegador seria confiar en el cliente para elegir que se baja.
             requestBody.bundle = true;
             requestBody.bundle_language = 'es';
+            // De donde sale el español: la edición publicada, o este mismo
+            // libro traducido. Lo decidio checkBundleAvailability al mirar el
+            // catalogo; el servidor lo vuelve a comprobar de todas formas.
+            requestBody.bundle_es_source =
+                cardElement.dataset.bundleEsSource || 'edition';
         }
         if (cardElement.querySelector('.skip-images').checked) {
             requestBody.skip_images = true;

@@ -2,9 +2,14 @@ import re
 import time
 
 from .base import Plugin
-from .errors import SessionExpired
+from .errors import PreviewOnly, SessionExpired
 from core.types import ChapterInfo
 import config
+
+
+# El urn del libro dentro de una url de capitulo. Sirve para preguntarle a la
+# API por el indice de ESE libro sin tener que arrastrar el book_id hasta aqui.
+_BOOK_URN_RE = re.compile(r"(urn:orm:book:[^/]+)")
 
 
 class ChaptersPlugin(Plugin):
@@ -83,6 +88,10 @@ class ChaptersPlugin(Plugin):
     # paragraph of each chapter, so detect it and retry/fail loudly.
     _PREVIEW_MAX_BYTES = 6000
     _PREVIEW_RETRIES = 3
+    # Intentos COMPLETOS (con pausa y cookies nuevas en medio) antes de dejar de
+    # culpar a la sesion. Dos: el primero puede ser la sesion de verdad, el
+    # segundo ya demuestra que las cookies no eran el problema.
+    _PREVIEW_GIVE_UP = 2
     # Cuanto vale la comprobacion de sesion antes de repetirla. Un libro puede
     # tener varios capitulos cortos seguidos (apendices, indice) y no hace
     # falta un control por cada uno.
@@ -94,6 +103,26 @@ class ChaptersPlugin(Plugin):
         # proposito — cualquier capitulo completo prueba lo mismo.
         self._reference_url: str | None = None
         self._alive_until: float = 0.0
+        # Cuantas veces ha fallado cada capitulo con un avance. Sobrevive a la
+        # pausa porque este plugin es un singleton del kernel, y es justo lo que
+        # rompe el bucle de cookies.
+        self._preview_failures: dict[str, int] = {}
+        # Contabilidad de la descarga en curso. Es lo que permite distinguir
+        # "una portada diminuta" de "este libro entero son avances", que es
+        # justo lo que no se podia decidir mirando una pagina de una en una.
+        self.full_pages = 0
+        self.short_accepted: list[tuple[str, int]] = []
+        self.consecutive_short = 0
+
+    def reset_stats(self) -> None:
+        """Pone a cero la contabilidad. Una llamada por libro.
+
+        El plugin es un singleton del kernel, asi que sin esto las cuentas de
+        una descarga contaminarian el veredicto de la siguiente.
+        """
+        self.full_pages = 0
+        self.short_accepted = []
+        self.consecutive_short = 0
 
     def fetch_content(self, content_url: str) -> str:
         """Fetch chapter HTML, retrying if the server returns a preview stub."""
@@ -101,8 +130,19 @@ class ChaptersPlugin(Plugin):
         for attempt in range(self._PREVIEW_RETRIES):
             last = self.http.get_text(content_url)
             if not self._looks_truncated(last):
+                # Pagina sana: el detector no la marco, asi que es contenido
+                # correcto SEA DEL TAMANO QUE SEA. Contarla solo si pasaba de
+                # 6000 bytes era el error que mataba libros buenos: hay titulos
+                # de O'Reilly partidos en secciones pequenas donde ninguna
+                # pagina llega a ese tamano.
+                self.full_pages += 1
+                self.consecutive_short = 0
+                # El umbral sigue mandando para UNA cosa: elegir un capitulo lo
+                # bastante grande como patron de control. Una seccion de dos
+                # parrafos no sirve para distinguir sesion viva de sesion caida.
                 if len(last) > self._PREVIEW_MAX_BYTES:
                     self._reference_url = content_url
+                self._preview_failures.pop(content_url, None)
                 return last
 
             # "Corto y acabado en puntos suspensivos" es una SOSPECHA, no un
@@ -110,10 +150,17 @@ class ChaptersPlugin(Plugin):
             # de verdad. Antes se daba por caducada la sesion sin comprobarlo, y
             # entonces no habia cookies que arreglaran nada — pegabas unas
             # nuevas, reintentaba, y el mismo capitulo volvia a fallar igual.
-            if self._session_alive():
-                print(f"[CHAPTERS] {content_url} es corto y acaba en puntos "
-                      f"suspensivos, pero la sesion responde completo: "
-                      f"se acepta como contenido real ({len(last)} bytes)")
+            if self._session_alive(content_url):
+                # Se acepta, pero NO en silencio. La sesion responde, asi que no
+                # tiene sentido culpar a las cookies; que la pagina sea contenido
+                # real de verdad es otra pregunta, y esa la responde el recuento
+                # global al final de la descarga.
+                self.short_accepted.append((content_url, len(last)))
+                self.consecutive_short += 1
+                print(f"[CHAPTERS] {content_url} llego corto ({len(last)} bytes) "
+                      f"y la sesion responde: se acepta provisionalmente "
+                      f"({len(self.short_accepted)} cortas / "
+                      f"{self.full_pages} completas)")
                 return last
 
             if attempt < self._PREVIEW_RETRIES - 1:
@@ -124,36 +171,108 @@ class ChaptersPlugin(Plugin):
                     reload_cookies()
                 time.sleep(config.RETRY_BACKOFF * (attempt + 1))
 
+        fallos = self._preview_failures.get(content_url, 0) + 1
+        self._preview_failures[content_url] = fallos
+
+        # Segunda vuelta con este mismo capitulo: ya hubo una pausa y unas
+        # cookies nuevas en medio, y sigue llegando un avance. La sesion no es
+        # el problema, asi que se deja de pedir cookies -- pedirlas otra vez es
+        # el bucle que esto viene a romper.
+        if fallos >= self._PREVIEW_GIVE_UP:
+            self._preview_failures.pop(content_url, None)
+            raise PreviewOnly(
+                f"O'Reilly sigue devolviendo solo un avance de {content_url} "
+                f"({len(last)} bytes) despues de {fallos} rondas con cookies "
+                "recargadas. La sesion no es el problema: o esta pagina es "
+                "legitimamente corta, o este libro no esta completo en esta "
+                "cuenta.",
+                html=last,
+            )
+
+        # Primera vuelta: puede ser la sesion, asi que se pausa y se piden
+        # cookies. Pero no se AFIRMA que haya caducado cuando no hay forma de
+        # saberlo.
+        #
         # SessionExpired y no RuntimeError: la cola reacciona distinto a esto
         # que a cualquier otro fallo — en vez de perder el trabajo, lo pausa y
         # espera cookies nuevas para seguir donde iba.
+        if self._reference_url is None:
+            detalle = ("Todavia no habia llegado ningun capitulo completo, asi "
+                       "que no hay patron de control: puede ser la sesion, o "
+                       "puede que este libro no este completo en esta cuenta.")
+        else:
+            detalle = ("Un capitulo que antes llegaba completo tampoco llega "
+                       "ahora, asi que la sesion es lo mas probable.")
+
         raise SessionExpired(
             f"O'Reilly devolvio solo un avance de {content_url} "
-            f"({len(last)} bytes) y {self._jwt_note()} "
+            f"({len(last)} bytes) y {self._jwt_note()} {detalle} "
             "Pega cookies nuevas para continuar."
         )
 
-    def _session_alive(self) -> bool:
-        """True si un capitulo que ya llego completo sigue llegando completo.
+    def seed_reference(self, content_url: str, size: int) -> None:
+        """Adopta un capitulo ya completo (leido de cache) como patron de control.
 
-        Es la unica prueba fiable de que la sesion sirve: mirar la fecha `exp`
-        del orm-jwt no vale, porque O'Reilly puede dejar de honrar un token que
-        aun no ha caducado (por ejemplo si el navegador lo rota en otra pestaña).
-        Sin patron de control todavia no se puede afirmar nada, y ahi se
-        mantiene la conducta prudente: tratarlo como sesion caida.
+        Reanudar una descarga lee los capitulos de disco sin pasar por
+        fetch_content, asi que _reference_url se quedaba vacio y _session_alive
+        no podia afirmar nada. Consecuencia medida: about_pearson.xhtml, que mide
+        1140 bytes porque de verdad mide eso, pasaba por avance truncado y
+        tumbaba la descarga entera de un libro que estaba perfectamente.
         """
-        if not self._reference_url:
-            return False
+        if self._reference_url is None and size > self._PREVIEW_MAX_BYTES:
+            self._reference_url = content_url
+
+    def _session_alive(self, content_url: str = "") -> bool:
+        """True si la sesion de O'Reilly sigue sirviendo contenido.
+
+        Mirar la fecha `exp` del orm-jwt no vale: O'Reilly puede dejar de honrar
+        un token que aun no ha caducado (por ejemplo si el navegador lo rota en
+        otra pestaña). Asi que se comprueba pidiendo algo de verdad.
+
+        Dos vias, y la segunda es la que faltaba:
+
+        1. Si hay patron de control -- un capitulo que ya llego completo --, se
+           vuelve a pedir. Si sigue llegando completo, la sesion sirve.
+        2. Si NO hay patron, se pregunta al indice del libro. Esto pasa SIEMPRE
+           al principio de una descarga, y justo ahi las primeras paginas
+           (portada, creditos, dedicatoria) son legitimamente diminutas: antes
+           se devolvia False sin ninguna prueba y la descarga se paraba a pedir
+           cookies que no arreglaban nada.
+        """
         if time.time() < self._alive_until:
             return True
-        try:
-            control = self.http.get_text(self._reference_url)
-        except Exception:  # noqa: BLE001 - si el control falla, no se afirma nada
+
+        if self._reference_url:
+            try:
+                control = self.http.get_text(self._reference_url)
+            except Exception:  # noqa: BLE001 - si el control falla, no se afirma nada
+                return False
+            if len(control) > self._PREVIEW_MAX_BYTES:
+                self._alive_until = time.time() + self._ALIVE_TTL
+                return True
             return False
-        if len(control) > self._PREVIEW_MAX_BYTES:
-            self._alive_until = time.time() + self._ALIVE_TTL
-            return True
-        return False
+
+        return self._session_probe(content_url)
+
+    def _session_probe(self, content_url: str) -> bool:
+        """La sesion responde a un endpoint que exige auth?
+
+        El indice del propio libro: lo acaba de pedir el downloader con exito
+        segundos antes, exige sesion valida, y su tamaño no depende de ninguna
+        pagina. Es la prueba que no existia cuando aun no hay patron de control.
+        """
+        match = _BOOK_URN_RE.search(content_url or "")
+        if not match:
+            return False
+        url = f"{config.API_V2}/epubs/{match.group(1)}/table-of-contents/"
+        try:
+            data = self.http.get_json(url)
+        except Exception:  # noqa: BLE001 - sin respuesta no se afirma nada
+            return False
+        if not data:
+            return False
+        self._alive_until = time.time() + self._ALIVE_TTL
+        return True
 
     def _jwt_note(self) -> str:
         """Que decia el token en el momento del fallo.

@@ -395,8 +395,14 @@ async function batchTick() {
         const titulo = document.getElementById('batch-title');
         const n = lista.querySelectorAll('.batch-item').length;
         if (titulo) {
+            // Un bundle son dos mitades: llamarlo "1 elemento" sin decir
+            // que es un bundle es lo que hacia que pareciera otra cosa.
+            const hayBundle = (snap.jobs || []).some(function (j) {
+                return j.bundle_id && BATCH_ACTIVOS.indexOf(j.status) !== -1;
+            });
             titulo.textContent = 'Descargando ' + n
-                + (n === 1 ? ' elemento' : ' elementos');
+                + (n === 1 ? ' elemento' : ' elementos')
+                + (hayBundle ? ' \u00b7 bundle' : '');
         }
     }
 
@@ -412,6 +418,7 @@ async function batchTick() {
         fill.style.width = (job.percentage || 0) + '%';
         row.dataset.status = job.status;
         state.textContent = batchLabel(job);
+        batchRenderBundleTag(row, job);
         fill.classList.toggle('is-paused', job.status === 'paused');
         fill.classList.toggle('is-error', job.status === 'error');
 
@@ -437,6 +444,37 @@ async function batchTick() {
         batchStopPolling();
         if (typeof loadLibrary === 'function') loadLibrary({ refresh: true });
     }
+}
+
+/* Marca la fila como mitad de un bundle, y deja volver a su ventana.
+
+   Sin esto un bundle en marcha se veia como una descarga suelta: la modal del
+   bundle solo se abria al lanzarla, asi que al cerrarla o recargar la pagina no
+   habia forma de volver a verla. */
+function batchRenderBundleTag(row, job) {
+    let tag = row.querySelector('.batch-bundle-tag');
+    if (!job.bundle_id) {
+        if (tag) tag.remove();
+        return;
+    }
+    if (!tag) {
+        tag = document.createElement('button');
+        tag.type = 'button';
+        tag.className = 'batch-bundle-tag';
+        tag.title = 'Parte de un bundle. Abre su ventana de progreso.';
+        const state = row.querySelector('.batch-state');
+        if (state && state.parentNode) state.parentNode.insertBefore(tag, state);
+        else row.appendChild(tag);
+    }
+    const idioma = { en: 'Inglés', es: 'Español' }[job.bundle_lang]
+        || job.bundle_lang || '';
+    tag.textContent = 'BUNDLE' + (idioma ? ' · ' + idioma : '')
+        + (job.target_lang ? ' · IA' : '');
+    tag.onclick = function () {
+        if (typeof reopenBundleModal === 'function') {
+            reopenBundleModal(job.bundle_id);
+        }
+    };
 }
 
 function batchLabel(job) {
@@ -502,11 +540,18 @@ function batchRenderPausedNotice(paused, job) {
 
     const texto = document.createElement('p');
     texto.className = 'batch-paused-text';
-    texto.textContent = (job && job.title
-        ? 'La sesión caducó en "' + job.title + '". Lo descargado se conserva y '
-        : 'La sesión caducó. Lo descargado se conserva y ')
-        + 'sigue desde donde iba. En una pestaña de learning.oreilly.com abre la '
-        + 'consola (F12), pega esto, Enter, y pégalo aquí abajo:';
+    // El motivo REAL viaja en job.message, con los bytes que llegó a devolver
+    // O'Reilly. Antes se tiraba y se afirmaba "la sesión caducó", que es una
+    // suposición: el mismo síntoma lo produce un libro que no está completo en
+    // la cuenta, y ahí no hay cookies que arreglen nada.
+    const motivo = (job && job.message) ? String(job.message) : '';
+    texto.textContent = (motivo ? motivo + ' '
+        : (job && job.title
+            ? 'La descarga de "' + job.title + '" se detuvo pidiendo cookies. '
+            : 'La descarga se detuvo pidiendo cookies. '))
+        + 'Lo descargado se conserva y sigue desde donde iba. En una pestaña de '
+        + 'learning.oreilly.com abre la consola (F12), pega esto, Enter, y '
+        + 'pégalo aquí abajo:';
 
     // El snippet y su botón de copiar, en una fila propia. Seleccionar a mano
     // una línea larga es justo cómo se acaba pegando un JSON truncado.

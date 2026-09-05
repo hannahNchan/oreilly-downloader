@@ -97,6 +97,22 @@ from bs4 import BeautifulSoup, NavigableString
 import config
 from .base import Plugin
 
+# withinText="nested" de ITS 2.0: los cuatro elementos de contenido fraseado
+# cuyo contenido NO se pega al texto de alrededor. Estan dentro de la linea, pero
+# lo que llevan dentro es un documento aparte.
+#
+# Aqui se tratan como atomos: un placeholder con su marcado entero, sin bajar a
+# su contenido. Se podria traducir el texto de un <noscript> o el de un
+# <textarea> como unidad propia, pero en un libro tecnico eso no aparece casi
+# nunca, y un atomo intacto es mas seguro que una unidad mal segmentada.
+#
+# El que estaba roto de verdad era <textarea>: era inline y NO estaba protegido,
+# asi que caia en la rama "quedate el texto y tira la etiqueta" -- su contenido
+# se fundia con la frase de alrededor y la etiqueta desaparecia. <noscript> no
+# estaba en ninguna de las dos listas, asi que pasaba por bloque y hacia que su
+# parrafo dejara de ser hoja.
+NESTED_TAGS = frozenset({"iframe", "noscript", "script", "textarea"})
+
 # HTML inline-level elements, from MDN's inline-level content list plus MathML.
 # Everything NOT in here is a block, which is how leaf blocks get found.
 # Source of the idea and of the list: oomol-lab/epub-translator, xml/inline.py.
@@ -120,7 +136,11 @@ INLINE_TAGS = frozenset({
     "mstyle", "mmultiscripts", "mover", "mprescripts", "msub", "msubsup",
     "msup", "munder", "munderover", "mtable", "mtr", "mtd", "annotation",
     "annotation-xml", "semantics", "maction",
-})
+    # MathML 3 presentation. Raros en libros tecnicos, pero si aparecen y no
+    # estan aqui su texto se pega a la prosa de alrededor como una palabra mas.
+    "mglyph", "mlabeledtr", "none", "msline", "mstack", "mlongdiv", "msgroup",
+    "msrow", "mscarries", "mscarry", "maligngroup", "malignmark",
+}) | NESTED_TAGS
 
 # Content that must never be translated AND must never be lost. One placeholder
 # each, holding the element's whole markup. If one of these does not come back,
@@ -129,7 +149,10 @@ PROTECTED_TAGS = frozenset({
     "pre", "code", "kbd", "samp", "var", "tt", "script", "style",
     "img", "svg", "math", "iframe", "object", "embed", "audio", "video",
     "canvas", "picture",
-})
+    # La union en vez de repetir los nombres a mano: asi el invariante
+    # "todo lo nested esta protegido Y es inline" no se puede romper por
+    # despiste al editar una de las dos listas.
+}) | NESTED_TAGS
 
 # Appearance only. A pair of placeholders, and losing them costs a bit of
 # formatting, not content, so the translation is kept anyway.
@@ -185,6 +208,63 @@ def is_inline_name(name: str | None) -> bool:
     return bool(name) and name.lower() in INLINE_TAGS
 
 
+def is_inline_element(node) -> bool:
+    """Como is_inline_name, pero mirando tambien el atributo display.
+
+    MathML lo usa: <math display="block"> es una ecuacion de bloque y
+    <math display="inline"> va en la linea. La idea es de
+    oomol-lab/epub-translator, xml/inline.py.
+
+    Conviene decir lo que NO arregla: math ya esta en PROTECTED_TAGS, asi que
+    una ecuacion viaja como placeholder con display o sin el. Esto es correccion
+    del criterio de bloque, no el arreglo de algo que se estuviera rompiendo.
+    """
+    name = getattr(node, "name", None) or ""
+    display = None
+    attrs = getattr(node, "attrs", None)
+    if attrs:
+        display = attrs.get("display")
+        if isinstance(display, (list, tuple)):
+            display = " ".join(str(item) for item in display)
+        if display is not None:
+            display = str(display).strip().lower()
+
+    if display == "inline":
+        return True
+    if name.lower() == "math":
+        # Por defecto inline: es el valor por omision del atributo en MathML.
+        return display != "block"
+    return is_inline_name(name)
+
+
+def is_translatable(node) -> bool:
+    """Si el atributo translate de HTML permite traducir este nodo.
+
+    No es hipotetico: O'Reilly lo marca. En un solo capitulo medido hay 2539
+    <code translate="no"> y 42 <pre translate="no">. Que hoy no se corrompan es
+    casualidad -- pre y code ya estan en PROTECTED_TAGS -- pero un
+    <p translate="no"> con una cita legal o un nombre de producto se traducia
+    igual, contra la instruccion explicita del editor.
+
+    Sube hasta el valor explicito MAS CERCANO, no mira solo el nodo: el atributo
+    se hereda a los descendientes, y un descendiente puede volver a activarlo.
+    Asi lo define ITS 2.0 para HTML, que delega en este atributo nativo.
+    """
+    current = node
+    while current is not None:
+        attrs = getattr(current, "attrs", None)
+        if attrs:
+            value = attrs.get("translate")
+            if value is not None:
+                if isinstance(value, (list, tuple)):
+                    value = " ".join(str(item) for item in value)
+                # Solo "no" desactiva. El vacio vale "yes" segun HTML, asi que
+                # cualquier otra cosa deja seguir.
+                return str(value).strip().lower() != "no"
+        current = getattr(current, "parent", None)
+    return True
+
+
 @dataclass
 class _Unit:
     """One thing to translate, and how to put the answer back."""
@@ -211,6 +291,17 @@ class TranslatorPlugin(Plugin):
 
     # --- availability -----------------------------------------------------
 
+    def health(self) -> dict:
+        """El /health del servicio, o {} si no contesta.
+
+        Publico porque la UI necesita el MOTIVO y no solo el si/no: un checkbox
+        deshabilitado sin explicacion es una pared.
+        """
+        try:
+            return self._get("/health", timeout=5) or {}
+        except Exception:
+            return {}
+
     def is_available(self) -> bool:
         """True if the service answers and has the model loaded.
 
@@ -226,6 +317,65 @@ class TranslatorPlugin(Plugin):
         return bool((data or {}).get("model", {}).get("loaded"))
 
     # --- entry point ------------------------------------------------------
+
+    def translate_texts(self, texts: list, target_lang: str) -> list:
+        """Traduce una lista de cadenas planas. Lo que falle vuelve igual.
+
+        Texto plano y sin marcado: titulos y etiquetas del indice. Aqui no entra
+        nada de la maquinaria de placeholders, asi que es el camino mas seguro
+        que hay -- no queda estructura que perder.
+        """
+        flores = config.NLLB_TARGET_LANGS.get(target_lang)
+        if not flores:
+            return list(texts)
+
+        # Deduplicado: el indice repite la misma etiqueta que la cabecera del
+        # capitulo, y pagar dos veces por ella seria absurdo.
+        unique = list(dict.fromkeys(
+            str(t) for t in texts if t and str(t).strip()
+        ))
+        if not unique:
+            return list(texts)
+
+        results = self._translate([collapse_whitespace(t) for t in unique], flores)
+
+        mapping = {}
+        for source, translated in zip(unique, results):
+            if translated and str(translated).strip():
+                mapping[source] = str(translated).strip()
+
+        done = sum(1 for t in texts if t and str(t) in mapping)
+        print(f"[TRANSLATE] {done}/{len(texts)} etiqueta(s) de texto traducidas")
+        return [mapping.get(str(t), t) if t else t for t in texts]
+
+    def translate_toc(self, toc: list, target_lang: str) -> int:
+        """Traduce el 'title' de cada entrada de un indice anidado, en su sitio.
+
+        Muta el arbol que recibe: es el MISMO objeto del que tiran el nav del
+        EPUB, el toc.ncx y el indice del PDF, asi que traducirlo una vez arregla
+        los tres. Devuelve cuantas etiquetas cambiaron.
+        """
+        entries = []
+
+        def walk(items):
+            for item in items or []:
+                if isinstance(item, dict):
+                    entries.append(item)
+                    walk(item.get("children"))
+
+        walk(toc)
+        if not entries:
+            return 0
+
+        labels = [str(entry.get("title") or "") for entry in entries]
+        translated = self.translate_texts(labels, target_lang)
+
+        changed = 0
+        for entry, before, after in zip(entries, labels, translated):
+            if after and after != before:
+                entry["title"] = after
+                changed += 1
+        return changed
 
     def translate_html(self, html: str, target_lang: str) -> str:
         """Translate the prose of an HTML fragment, preserving its markup.
@@ -363,10 +513,14 @@ class TranslatorPlugin(Plugin):
                     continue
                 name = name.lower()
 
-                if name in PROTECTED_TAGS:
+                if name in PROTECTED_TAGS or not is_translatable(child):
                     # Whole element as one placeholder. Its text never reaches
                     # the model, and losing it would delete content, so it is
                     # required.
+                    #
+                    # translate="no" entra por la misma puerta a proposito: la
+                    # forma de respetarlo es no enviarlo, y como placeholder
+                    # requerido conserva ademas su sitio en la frase.
                     placeholder(str(child), True)
                     continue
 
@@ -531,10 +685,12 @@ class TranslatorPlugin(Plugin):
         blocks = []
         for element in soup.find_all(True):
             name = (element.name or "").lower()
-            if is_inline_name(name) or name in PROTECTED_TAGS:
+            if is_inline_element(element) or name in PROTECTED_TAGS:
                 continue
             if self._has_protected_ancestor(element):
                 continue
+            if not is_translatable(element):
+                continue  # el editor dijo que no
             if self._has_block_descendant(element):
                 continue  # not a leaf: its children are the real units
             if not self._prose_text(element).strip():
@@ -546,7 +702,7 @@ class TranslatorPlugin(Plugin):
     def _has_block_descendant(element) -> bool:
         for descendant in element.find_all(True):
             name = (descendant.name or "").lower()
-            if not is_inline_name(name) and name not in PROTECTED_TAGS:
+            if not is_inline_element(descendant) and name not in PROTECTED_TAGS:
                 return True
         return False
 
@@ -555,6 +711,8 @@ class TranslatorPlugin(Plugin):
         parts = []
         for node in element.find_all(string=True):
             if node.parent is not None and self._has_protected_ancestor(node):
+                continue
+            if not is_translatable(node):
                 continue
             parts.append(str(node))
         return "".join(parts)
@@ -576,6 +734,8 @@ class TranslatorPlugin(Plugin):
             if not core:
                 continue
             if self._has_protected_ancestor(node):
+                continue
+            if not is_translatable(node):
                 continue
             lead = raw[: len(raw) - len(raw.lstrip())]
             trail = raw[len(raw.rstrip()):]
@@ -602,7 +762,7 @@ class TranslatorPlugin(Plugin):
         # breaks rendering and EPUB validation.
         for child in list(source.children):
             name = getattr(child, "name", None)
-            if name and not is_inline_name(name) and name.lower() not in PROTECTED_TAGS:
+            if name and not is_inline_element(child) and name.lower() not in PROTECTED_TAGS:
                 child.unwrap()
 
         children = list(source.contents)
