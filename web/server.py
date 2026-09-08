@@ -74,6 +74,12 @@ class DownloaderHandler(SimpleHTTPRequestHandler):
             self._send_json({"items": self.kernel["watchlist"].annotated()})
         elif path == "/api/settings":
             self._handle_get_settings()
+        elif path == "/api/cwa/status":
+            self._handle_cwa_status()
+        elif path == "/api/cwa/inventory":
+            self._handle_cwa_inventory()
+        elif path == "/api/cwa/transfer":
+            self._send_json(self.kernel["cwa"].progress())
         elif path == "/api/formats":
             self._handle_formats()
         elif path == "/api/search-filters":
@@ -124,6 +130,10 @@ class DownloaderHandler(SimpleHTTPRequestHandler):
 
         if self.path == "/api/download":
             self._handle_download(data)
+        elif self.path == "/api/cwa/path":
+            self._handle_cwa_path(data)
+        elif self.path == "/api/cwa/transfer":
+            self._handle_cwa_transfer(data)
         elif self.path == "/api/cookies":
             self._handle_cookies(data)
         elif self.path == "/api/cancel":
@@ -325,6 +335,35 @@ class DownloaderHandler(SimpleHTTPRequestHandler):
             payload.update({"status": "paused", "error": job["message"]})
 
         self._send_json(payload)
+
+    def _handle_cwa_status(self):
+        self._send_json(self.kernel["cwa"].status())
+
+    def _handle_cwa_inventory(self):
+        """El inventario deduplicado, con el estado de CWA siempre incluido.
+
+        Una sola forma de respuesta con y sin destino configurado: la UI decide
+        que pintar leyendo `status`, en vez de tener que distinguir dos formas.
+        """
+        cwa = self.kernel["cwa"]
+        estado = cwa.status()
+        payload = {"status": estado, "items": [], "total_files": 0,
+                   "unique": 0, "duplicates": 0, "already_sent": 0}
+        if estado["ok"]:
+            try:
+                payload.update(cwa.inventory())
+                payload["status"] = estado
+            except Exception as exc:  # noqa: BLE001
+                payload["error"] = f"{type(exc).__name__}: {exc}"
+        self._send_json(payload)
+
+    def _handle_cwa_path(self, data: dict):
+        result = self.kernel["cwa"].set_path((data or {}).get("path") or "")
+        self._send_json(result, 200 if result.get("ok") else 400)
+
+    def _handle_cwa_transfer(self, data: dict):
+        result = self.kernel["cwa"].transfer((data or {}).get("keys") or [])
+        self._send_json(result, 409 if result.get("error") else 200)
 
     def _handle_get_settings(self):
         """Return current settings."""

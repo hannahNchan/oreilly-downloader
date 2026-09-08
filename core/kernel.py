@@ -38,6 +38,7 @@ def create_default_kernel() -> Kernel:
         LibraryPlugin,
         EditionsPlugin,
         BundlePlugin,
+        CwaPlugin,
         OutputPlugin,
         QueuePlugin,
         WatchlistPlugin,
@@ -74,6 +75,7 @@ def create_default_kernel() -> Kernel:
     kernel.register("watchlist", WatchlistPlugin())
     kernel.register("system", SystemPlugin())
     kernel.register("bundle", BundlePlugin())
+    kernel.register("cwa", CwaPlugin())
     kernel.register("downloader", DownloaderPlugin())
 
     return kernel

@@ -17,6 +17,7 @@ from .audiobook import AudiobookPlugin, AudiobookChapter, AudiobookResult
 from .library import LibraryPlugin
 from .editions import EditionsPlugin
 from .bundle import BundlePlugin
+from .cwa import CwaPlugin
 
 # Orchestration and system plugins
 from .output import OutputPlugin

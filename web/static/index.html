@@ -210,6 +210,10 @@
                         <span id="library-count" class="text-sm text-zinc-500"></span>
                         <span id="library-size" class="text-xs text-zinc-400"></span>
                     </div>
+                    <div class="flex items-center gap-3">
+                    <button id="cwa-open" class="px-3 py-1.5 text-sm font-medium text-oreilly-blue border border-oreilly-blue/30 rounded-lg hover:bg-oreilly-blue/5 transition-colors duration-150" title="Copiar los EPUB de la biblioteca y los bundles a la carpeta de ingesta de CWA">
+                        Transferir a CWA
+                    </button>
                     <label class="flex items-center gap-1.5 text-sm text-zinc-500">
                         Ordenar
                         <select id="library-sort" class="ctl-select">
@@ -221,6 +225,7 @@
                             <option value="added">Descargado (reciente)</option>
                         </select>
                     </label>
+                    </div>
                 </div>
                 <div id="transfer-bar" class="hidden flex items-center justify-between gap-3 flex-wrap mb-3 px-3 py-2.5 rounded-lg bg-amber-50 border border-amber-200">
                     <span id="transfer-msg" class="text-sm text-amber-800"></span>
@@ -373,6 +378,26 @@
         </div>
     </div>
 
+    <!-- Transferir a CWA. Solo copia: los EPUB originales de la biblioteca y
+         de los bundles se quedan donde estan. El cuerpo se repinta segun el
+         estado (sin ruta / no escribe / lista / enviando), por eso va vacio. -->
+    <div id="cwa-modal" class="hidden fixed inset-0 z-50 overflow-y-auto" role="dialog" aria-modal="true" aria-labelledby="cwa-modal-title">
+        <div class="fixed inset-0 bg-black/40" id="cwa-modal-backdrop"></div>
+        <div class="relative min-h-full flex items-center justify-center p-4">
+            <div class="relative bg-white rounded-xl shadow-xl w-full max-w-2xl p-6">
+                <h3 id="cwa-modal-title" class="text-lg font-semibold text-zinc-800">Transferir a CWA</h3>
+                <p id="cwa-modal-sub" class="text-sm text-zinc-500 mt-1"></p>
+
+                <div id="cwa-modal-body" class="mt-5"></div>
+
+                <div class="mt-6 flex justify-end gap-2">
+                    <button id="cwa-modal-close" class="px-4 py-2 text-zinc-600 hover:bg-zinc-100 rounded-lg font-medium transition-colors duration-150">Cerrar</button>
+                    <button id="cwa-modal-action" class="hidden px-4 py-2 bg-oreilly-blue text-white rounded-lg font-medium hover:bg-oreilly-blue-dark disabled:opacity-40 disabled:cursor-not-allowed transition-colors duration-150"></button>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <div id="settings-modal" class="hidden fixed inset-0 z-50 overflow-y-auto" role="dialog" aria-modal="true" aria-labelledby="settings-title">
         <div class="min-h-screen px-4 flex items-center justify-center">
             <div class="fixed inset-0 bg-zinc-900/60 backdrop-blur-sm transition-opacity" data-close-settings></div>
@@ -424,5 +449,6 @@
     <script src="watchlist.js"></script>
     <script src="batch.js"></script>
     <script src="app.js"></script>
+    <script src="cwa.js"></script>
 </body>
 </html>
