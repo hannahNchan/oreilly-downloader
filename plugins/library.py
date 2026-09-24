@@ -947,6 +947,68 @@ class LibraryPlugin(Plugin):
 
         return items
 
+    def delete_item(self, item: dict) -> None:
+        """Delete one indexed work without trusting a client-provided path."""
+        folder = str(item.get("folder") or "").strip()
+        location = item.get("location")
+        if not folder:
+            raise ValueError("el elemento no tiene identificador")
+
+        if location == "library":
+            root = self.root()
+            if root is None:
+                raise RuntimeError(
+                    f"La carpeta de la biblioteca no está accesible: {config.LIBRARY_DIR}")
+
+            root = root.resolve()
+            objects = (root / "objects").resolve()
+            rel = str(item.get("rel") or "").strip()
+            target = (root / rel).resolve() if rel else None
+            if (target is None or target == objects or objects not in target.parents
+                    or target.name != folder):
+                raise ValueError(f"la ubicación de '{folder}' no es válida")
+
+            if not target.is_dir():
+                raise FileNotFoundError(f"'{item.get('title') or folder}' ya no existe")
+            shutil.rmtree(target)
+            (root / "covers" / f"{folder}.jpg").unlink(missing_ok=True)
+            # El shard (los dos primeros caracteres del work_id) sólo agrupa
+            # objetos. Cuando se borra su último objeto no debe quedar como un
+            # directorio vacío acumulado en la biblioteca.
+            try:
+                target.parent.rmdir()
+            except OSError:
+                pass  # aún contiene otros objetos, o dejó de estar accesible
+            return
+
+        if location == "local":
+            base = self.kernel["output"].get_default_dir().resolve()
+            target = (base / folder).resolve()
+            if target.parent != base:
+                raise ValueError(f"la ubicación local de '{folder}' no es válida")
+            if not target.is_dir():
+                raise FileNotFoundError(f"'{item.get('title') or folder}' ya no existe")
+            shutil.rmtree(target)
+            return
+
+        raise ValueError(f"ubicación desconocida para '{folder}'")
+
+    def finish_deletions(self, deleted_locations: set[str]) -> None:
+        """Refresh the affected indexes once after a batch deletion."""
+        if "library" in deleted_locations:
+            self.rebuild_index()
+            root = self.root()
+            if root is not None:
+                objects = root / "objects"
+                for shard in objects.iterdir():
+                    if shard.is_dir():
+                        try:
+                            shard.rmdir()
+                        except OSError:
+                            pass
+        if "local" in deleted_locations:
+            self._scan_local(None, refresh=True)
+
     def _scan_local(self, output_dir: Path | None, refresh: bool) -> list[dict]:
         """Recorre el staging local, con caché por mtime de carpeta."""
         base = output_dir or self.kernel["output"].get_default_dir()

@@ -612,9 +612,7 @@ async function loadLibrary(options) {
         const data = await res.json();
         if (data.error) throw new Error(data.error);
 
-        const visible = (data.items || []).filter(function (it) {
-            return !readSet(HIDDEN_KEY).has(it.folder);
-        }).length;
+        const visible = (data.items || []).length;
         document.getElementById('library-count').textContent =
             visible === data.total
                 ? data.total + ' en tu biblioteca'
@@ -633,11 +631,8 @@ async function loadLibrary(options) {
             });
         }
 
-        // Los ocultados con "Eliminar de la biblioteca" solo se filtran aqui:
-        // el contenido sigue en disco.
-        const hidden = readSet(HIDDEN_KEY);
         const favs = readSet(FAV_KEY);
-        let items = (data.items || []).filter(function (it) { return !hidden.has(it.folder); });
+        let items = data.items || [];
         // Los favoritos primero, respetando el orden elegido dentro de cada grupo
         items = items.filter(i => favs.has(i.folder)).concat(items.filter(i => !favs.has(i.folder)));
 
@@ -645,6 +640,9 @@ async function loadLibrary(options) {
         items.forEach(function (item) {
             grid.appendChild(libraryTile(item));
         });
+        if (typeof libraryDeleteSetVisible === 'function') {
+            libraryDeleteSetVisible(items);
+        }
 
         const none = !items.length;
         empty.classList.toggle('hidden', !none);
@@ -674,6 +672,7 @@ function libraryTile(item) {
     const div = document.createElement('article');
     div.className = 'book-card group bg-white rounded-xl border border-zinc-200 overflow-hidden transition-all duration-200 hover:border-zinc-300 hover:shadow-card-hover cursor-pointer';
     div.dataset.folder = item.folder;
+    div.dataset.location = item.location || '';
 
     const isAudio = item.content_type === 'audiobook';
     const badge = isAudio
@@ -752,6 +751,23 @@ function libraryTile(item) {
     // tres opciones el panel es mas alto que la portada, asi que ahi dentro
     // salia cortado a la mitad.
     div.appendChild(buildCardMenu(item));
+    const select = document.createElement('label');
+    select.className = 'library-card-select';
+    select.title = 'Seleccionar ' + item.title;
+    const selectBox = document.createElement('input');
+    selectBox.type = 'checkbox';
+    selectBox.className = 'library-item-check';
+    selectBox.setAttribute('aria-label', 'Seleccionar ' + item.title);
+    selectBox.addEventListener('click', function (event) { event.stopPropagation(); });
+    selectBox.addEventListener('change', function (event) {
+        event.stopPropagation();
+        if (typeof libraryDeleteToggle === 'function') {
+            libraryDeleteToggle(item, selectBox.checked);
+        }
+    });
+    select.appendChild(selectBox);
+    select.addEventListener('click', function (event) { event.stopPropagation(); });
+    div.appendChild(select);
     if (readSet(FAV_KEY).has(item.folder)) {
         const star = document.createElement('span');
         star.className = 'fav-star';
@@ -990,12 +1006,9 @@ function showSkeletons(grid, count) {
     }
 }
 
-/* ===== Acciones por titulo (favoritos / ocultar) =====
-   El estado vive en sessionStorage: "Eliminar de la biblioteca" solo la quita
-   de esta vista, NO borra nada del disco. */
+/* ===== Acciones por titulo ===== */
 
 const FAV_KEY = 'library:favorites';
-const HIDDEN_KEY = 'library:hidden';
 
 function readSet(key) {
     try {
@@ -1092,9 +1105,10 @@ function buildCardMenu(item) {
     };
     del.onclick = (e) => {
         e.stopPropagation();
-        toggleInSet(HIDDEN_KEY, item.folder);
         closeAllCardMenus();
-        loadLibrary();
+        if (typeof openLibraryDeleteModal === 'function') {
+            openLibraryDeleteModal([item]);
+        }
     };
 
     btn.onclick = (e) => {

@@ -2059,6 +2059,123 @@ body.batch-open { overflow: hidden; }
 
 .dark .wl-confirm-text { color: #d4d4d8; }
 
+/* Selección y eliminación permanente de la biblioteca. */
+.library-select-all {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    font-size: .875rem;
+    color: #52525b;
+    cursor: pointer;
+    white-space: nowrap;
+}
+
+.library-select-all input,
+.library-item-check {
+    width: 17px;
+    height: 17px;
+    accent-color: #0073e6;
+}
+
+.library-actions-wrap { position: relative; }
+
+#library-actions-btn {
+    padding: 6px 12px;
+    border: 1px solid #d4d4d8;
+    border-radius: 8px;
+    background: #fff;
+    color: #3f3f46;
+    font-size: .875rem;
+    font-weight: 500;
+}
+
+#library-actions-btn:disabled { opacity: .45; cursor: not-allowed; }
+#library-actions-btn:not(:disabled):hover { background: #f4f4f5; }
+
+#library-actions-menu {
+    position: absolute;
+    z-index: 30;
+    top: calc(100% + 6px);
+    left: 0;
+    min-width: 210px;
+    padding: 5px;
+    border: 1px solid #e4e4e7;
+    border-radius: 9px;
+    background: #fff;
+    box-shadow: 0 12px 28px rgba(0, 0, 0, .14);
+}
+
+#library-actions-menu button {
+    width: 100%;
+    padding: 8px 10px;
+    border-radius: 6px;
+    color: #d4002d;
+    text-align: left;
+    font-size: .8125rem;
+}
+
+#library-actions-menu button:hover { background: #fef2f2; }
+
+.library-card-select {
+    position: absolute;
+    z-index: 12;
+    top: 7px;
+    right: 7px;
+    display: grid;
+    place-items: center;
+    width: 29px;
+    height: 29px;
+    border: 1px solid rgba(255, 255, 255, .8);
+    border-radius: 8px;
+    background: rgba(255, 255, 255, .92);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, .18);
+    cursor: pointer;
+}
+
+#library-grid .card-menu { right: 43px; }
+
+.library-delete-shell {
+    position: relative;
+    width: min(520px, 100%);
+    padding: 24px;
+    border-radius: 14px;
+    background: #fff;
+    box-shadow: 0 24px 70px rgba(0, 0, 0, .28);
+}
+
+.library-delete-shell h3 { font-size: 1.125rem; font-weight: 650; color: #18181b; }
+#library-delete-message { margin-top: 8px; color: #52525b; font-size: .875rem; line-height: 1.55; }
+#library-delete-preview { margin-top: 14px; max-height: 170px; overflow: auto; }
+#library-delete-preview ul { display: grid; gap: 5px; }
+#library-delete-preview li { color: #71717a; font-size: .8125rem; }
+#library-delete-preview li::before { content: '•'; margin-right: 8px; color: #a1a1aa; }
+
+#library-delete-progress { margin-top: 20px; }
+.library-delete-progress-head { display: flex; justify-content: space-between; gap: 12px; font-size: .8125rem; color: #52525b; }
+#library-delete-current { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#library-delete-current.is-error { color: #dc2626; white-space: normal; }
+.library-delete-track { height: 8px; margin-top: 9px; overflow: hidden; border-radius: 999px; background: #e4e4e7; }
+#library-delete-bar { display: block; width: 0; height: 100%; background: #d4002d; transition: width .2s ease; }
+#library-delete-errors { margin-top: 12px; padding: 10px; max-height: 150px; overflow: auto; white-space: pre-wrap; border-radius: 8px; background: #fef2f2; color: #b91c1c; font-size: .75rem; }
+
+.library-delete-footer { display: flex; justify-content: flex-end; gap: 10px; margin-top: 22px; }
+.library-delete-footer button { padding: 9px 15px; border-radius: 8px; font-size: .875rem; font-weight: 600; }
+#library-delete-cancel { color: #52525b; background: #f4f4f5; }
+#library-delete-confirm { color: #fff; background: #d4002d; }
+.library-delete-footer button:disabled { opacity: .5; cursor: not-allowed; }
+
+.dark .library-select-all { color: #d4d4d8; }
+.dark #library-actions-btn { background: #1e1e23; border-color: #3f3f46; color: #e4e4e7; }
+.dark #library-actions-menu,
+.dark .library-delete-shell { background: #1e1e23; border-color: #3f3f46; }
+.dark #library-actions-menu button:hover { background: #3f1d28; }
+.dark .library-delete-shell h3 { color: #fafafa; }
+.dark #library-delete-message,
+.dark .library-delete-progress-head { color: #d4d4d8; }
+.dark #library-delete-preview li { color: #a1a1aa; }
+.dark .library-delete-track { background: #3f3f46; }
+.dark #library-delete-cancel { background: #2f2f37; color: #e4e4e7; }
+
 /* Formulario de cookies dentro de la modal de descargas. Vive aquí y no en el
    modal de cookies (z-50) porque este es z-70: se abría por detrás y parecía
    que el botón no hacía nada. */

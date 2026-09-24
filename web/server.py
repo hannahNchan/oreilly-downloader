@@ -21,6 +21,8 @@ class DownloaderHandler(SimpleHTTPRequestHandler):
     # descarga en marcha y mezclarlos dejaria la UI mostrando cualquier cosa.
     transfer_progress: dict = {}
     _transfer_lock = threading.Lock()
+    delete_progress: dict = {}
+    _delete_lock = threading.Lock()
 
     @classmethod
     def _set_transfer(cls, data: dict):
@@ -31,6 +33,16 @@ class DownloaderHandler(SimpleHTTPRequestHandler):
     def _update_transfer(cls, **kwargs):
         with cls._transfer_lock:
             cls.transfer_progress.update(kwargs)
+
+    @classmethod
+    def _set_delete(cls, data: dict):
+        with cls._delete_lock:
+            cls.delete_progress = data
+
+    @classmethod
+    def _update_delete(cls, **kwargs):
+        with cls._delete_lock:
+            cls.delete_progress.update(kwargs)
 
     def __init__(self, *args, **kwargs):
         self.static_dir = Path(__file__).parent / "static"
@@ -89,6 +101,9 @@ class DownloaderHandler(SimpleHTTPRequestHandler):
         elif path == "/api/library/transfer":
             with self._transfer_lock:
                 self._send_json(dict(self.transfer_progress))
+        elif path == "/api/library/delete":
+            with self._delete_lock:
+                self._send_json(dict(self.delete_progress))
         elif match := re.match(r"/api/library/tracks/(.+)$", path):
             self._handle_library_tracks(unquote(match.group(1)))
         elif match := re.match(r"/api/library/audio/(.+)/(\d+)$", path):
@@ -148,6 +163,8 @@ class DownloaderHandler(SimpleHTTPRequestHandler):
             self._handle_set_prefs(data)
         elif self.path == "/api/library/transfer":
             self._handle_transfer(data)
+        elif self.path == "/api/library/delete":
+            self._handle_library_delete(data)
         elif self.path == "/api/library/chapter-names":
             self._handle_chapter_names(data)
         elif match := re.match(r"/api/queue/([^/]+)/cancel$", self.path):
@@ -815,6 +832,88 @@ class DownloaderHandler(SimpleHTTPRequestHandler):
         self._set_transfer({"status": "completed", "total": len(folders),
                             "done": done, "failed": failed,
                             "objects": objects, "percentage": 100})
+
+    def _handle_library_delete(self, data: dict):
+        """Start a permanent, sequential deletion of indexed library items."""
+        requested = data.get("items")
+        if not isinstance(requested, list) or not requested:
+            self._send_json({"error": "No hay elementos seleccionados"}, 400)
+            return
+        if len(requested) > 10_000:
+            self._send_json({"error": "La selección es demasiado grande"}, 400)
+            return
+
+        with self._delete_lock:
+            if self.delete_progress.get("status") == "deleting":
+                self._send_json({"error": "Ya hay una eliminación en curso"}, 409)
+                return
+
+        inventory = {
+            (str(item.get("folder") or ""), str(item.get("location") or "")): item
+            for item in self.kernel["library"].scan()
+        }
+        items = []
+        seen = set()
+        for value in requested:
+            if not isinstance(value, dict):
+                continue
+            key = (str(value.get("folder") or ""), str(value.get("location") or ""))
+            if key in seen:
+                continue
+            seen.add(key)
+            item = inventory.get(key)
+            if item is not None:
+                items.append(item)
+
+        if not items:
+            self._send_json(
+                {"error": "Los elementos seleccionados ya no están en la biblioteca"}, 404)
+            return
+
+        first = items[0]
+        self._set_delete({
+            "status": "deleting", "total": len(items), "index": 0,
+            "current": first.get("title") or first.get("folder"),
+            "done": [], "failed": {}, "percentage": 0,
+        })
+        threading.Thread(
+            target=self._run_library_delete, args=(items,), daemon=True
+        ).start()
+        self._send_json({"status": "started", "count": len(items)})
+
+    def _run_library_delete(self, items: list[dict]):
+        library = self.kernel["library"]
+        done: list[dict] = []
+        failed: dict[str, str] = {}
+        locations: set[str] = set()
+        total = len(items)
+
+        for n, item in enumerate(items, start=1):
+            folder = str(item.get("folder") or "")
+            title = item.get("title") or folder
+            self._update_delete(
+                current=title, index=n, percentage=int((n - 1) * 100 / total))
+            try:
+                library.delete_item(item)
+                locations.add(str(item.get("location") or ""))
+                done.append({"folder": folder, "title": title})
+            except Exception as exc:  # noqa: BLE001
+                traceback.print_exc()
+                failed[folder] = f"{type(exc).__name__}: {exc}"
+            self._update_delete(done=list(done), failed=dict(failed))
+
+        index_error = None
+        try:
+            library.finish_deletions(locations)
+        except Exception as exc:  # noqa: BLE001
+            traceback.print_exc()
+            index_error = f"{type(exc).__name__}: {exc}"
+
+        self._set_delete({
+            "status": "completed", "total": total, "index": total,
+            "current": None, "done": done, "failed": failed,
+            "index_error": index_error, "percentage": 100,
+        })
 
     def _handle_search_filters(self):
         """Expose the filter vocabulary so the UI doesn't hardcode it."""

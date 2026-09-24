@@ -211,6 +211,16 @@
                         <span id="library-size" class="text-xs text-zinc-400"></span>
                     </div>
                     <div class="flex items-center gap-3">
+                    <label class="library-select-all">
+                        <input id="library-select-all" type="checkbox">
+                        <span>Seleccionar todo</span>
+                    </label>
+                    <div class="library-actions-wrap">
+                        <button id="library-actions-btn" type="button" disabled aria-haspopup="true" aria-expanded="false">Acciones</button>
+                        <div id="library-actions-menu" class="hidden" role="menu">
+                            <button id="library-delete-selected" type="button" role="menuitem">Eliminar definitivamente</button>
+                        </div>
+                    </div>
                     <button id="cwa-open" class="px-3 py-1.5 text-sm font-medium text-oreilly-blue border border-oreilly-blue/30 rounded-lg hover:bg-oreilly-blue/5 transition-colors duration-150" title="Copiar los EPUB de la biblioteca y los bundles a la carpeta de ingesta de CWA">
                         Transferir a CWA
                     </button>
@@ -398,6 +408,29 @@
         </div>
     </div>
 
+    <div id="library-delete-modal" class="hidden fixed inset-0 z-[90] overflow-y-auto" role="dialog" aria-modal="true" aria-labelledby="library-delete-title">
+        <div class="fixed inset-0 bg-black/50" id="library-delete-backdrop"></div>
+        <div class="relative min-h-full flex items-center justify-center p-4">
+            <div class="library-delete-shell">
+                <h3 id="library-delete-title">Eliminar definitivamente</h3>
+                <p id="library-delete-message"></p>
+                <div id="library-delete-preview"></div>
+                <div id="library-delete-progress" class="hidden">
+                    <div class="library-delete-progress-head">
+                        <span id="library-delete-current"></span>
+                        <span id="library-delete-counter"></span>
+                    </div>
+                    <div class="library-delete-track"><span id="library-delete-bar"></span></div>
+                    <div id="library-delete-errors" class="hidden"></div>
+                </div>
+                <div class="library-delete-footer">
+                    <button id="library-delete-cancel" type="button">Cancelar</button>
+                    <button id="library-delete-confirm" type="button">Aceptar y eliminar</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <div id="settings-modal" class="hidden fixed inset-0 z-50 overflow-y-auto" role="dialog" aria-modal="true" aria-labelledby="settings-title">
         <div class="min-h-screen px-4 flex items-center justify-center">
             <div class="fixed inset-0 bg-zinc-900/60 backdrop-blur-sm transition-opacity" data-close-settings></div>
@@ -449,6 +482,7 @@
     <script src="watchlist.js"></script>
     <script src="batch.js"></script>
     <script src="app.js"></script>
+    <script src="library-delete.js"></script>
     <script src="cwa.js"></script>
 </body>
 </html>
